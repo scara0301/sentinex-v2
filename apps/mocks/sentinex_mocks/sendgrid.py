@@ -10,7 +10,7 @@ from __future__ import annotations
 import structlog
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import Optional, Any
+from typing import Optional
 
 app = FastAPI(title="SENTINEX Mock SendGrid", docs_url=None)
 log = structlog.get_logger()

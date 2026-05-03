@@ -34,8 +34,8 @@ def _validate_yaml_dsl(yaml_str: str) -> tuple[bool, Optional[str]]:
     try:
         from sentinex_core.scenarios.dsl import validate_scenario_yaml
 
-        result = validate_scenario_yaml(yaml_str)
-        # validate_scenario_yaml raises on invalid; if it returns, we're good
+        validate_scenario_yaml(yaml_str)
+        # raises on invalid; if it returns, we're good
         return True, None
     except ImportError:
         # sentinex_core DSL validator not yet available — fall back to yaml parse

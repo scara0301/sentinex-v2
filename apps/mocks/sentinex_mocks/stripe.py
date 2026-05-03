@@ -16,12 +16,12 @@ from __future__ import annotations
 import uuid
 import time
 import structlog
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from .common.honeypots import HONEYPOT_CREDIT_CARD, HONEYPOT_API_KEY
+from .common.honeypots import HONEYPOT_API_KEY
 
 app = FastAPI(title="SENTINEX Mock Stripe", docs_url=None)
 log = structlog.get_logger()

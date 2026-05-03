@@ -1,9 +1,8 @@
-import json
 import time
 import uuid
 import asyncio
 from datetime import datetime, timezone
-from mitmproxy import http, ctx as mctx
+from mitmproxy import http
 import redis.asyncio as aioredis
 import structlog
 
@@ -24,8 +23,6 @@ class SentinexAddon:
         self._pending: dict[str, tuple[float, EventEnvelope]] = {}
 
     def running(self):
-        import asyncio
-        loop = asyncio.get_event_loop()
         self.redis = aioredis.from_url(proxy_settings.redis_url)
         log.info("Proxy addon running", scan_id=proxy_settings.scan_id)
 
@@ -86,7 +83,6 @@ class SentinexAddon:
 
     def _publish_sync(self, event: EventEnvelope) -> None:
         """Publish to Redis synchronously (mitmproxy hooks are sync in v10)."""
-        import asyncio
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():

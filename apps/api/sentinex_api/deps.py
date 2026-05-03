@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sentinex_core.db.base import get_session
 from sentinex_core.db.repos import WorkspaceRepo
-from .settings import settings
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from .base import AgentLoader, UploadBundle
-from ..schema import AgentManifest, AgentInfo, ToolDefinition, ModelConfig, LoaderMeta, SideEffect
+from ..schema import AgentManifest, AgentInfo, ToolDefinition, ModelConfig, LoaderMeta
 
 
 def _collect_py_files(bundle: UploadBundle) -> list[Path]:
