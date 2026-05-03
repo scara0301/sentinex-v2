@@ -1,0 +1,96 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: sentinex
+      POSTGRES_USER: sentinex
+      POSTGRES_PASSWORD: sentinex
+    volumes:
+      - sentinex_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinex -d sentinex"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  api:
+    build:
+      context: apps/api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sentinex:sentinex@postgres:5432/sentinex
+      REDIS_URL: redis://redis:6379/0
+      DEBUG: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./apps/api:/app
+    command: uv run uvicorn sentinex_api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: apps/worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sentinex:sentinex@postgres:5432/sentinex
+      REDIS_URL: redis://redis:6379/0
+      DOCKER_HOST: unix:///var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: uv run python -m sentinex_worker.main
+
+  mock-stripe:
+    build:
+      context: apps/mocks
+    ports:
+      - "4010:4010"
+    environment:
+      MOCK_PROVIDER: stripe
+    command: uv run uvicorn sentinex_mocks.stripe:app --host 0.0.0.0 --port 4010
+
+  mock-slack:
+    build:
+      context: apps/mocks
+    ports:
+      - "4011:4011"
+    environment:
+      MOCK_PROVIDER: slack
+    command: uv run uvicorn sentinex_mocks.slack:app --host 0.0.0.0 --port 4011
+
+  web:
+    build:
+      context: apps/web
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  sentinex_pgdata:

@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir uv==0.4.29
+
+COPY pyproject.toml .
+RUN uv pip install --system --no-cache -e .
+
+COPY sentinex_mocks/ sentinex_mocks/
+
+# MOCK_PROVIDER env var selects which provider to run (stripe|slack|twilio|sendgrid)
+# The orchestrator sets this when launching mock containers.
+ENV MOCK_PROVIDER=stripe
+
+EXPOSE 4010
+CMD ["sh", "-c", "uvicorn sentinex_mocks.${MOCK_PROVIDER}:app --host 0.0.0.0 --port 4010"]
