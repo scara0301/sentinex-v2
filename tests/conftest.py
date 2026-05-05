@@ -1,6 +1,4 @@
 import pytest
-import pytest_asyncio
-from typing import AsyncGenerator
 
 pytest_plugins = ("anyio",)
 

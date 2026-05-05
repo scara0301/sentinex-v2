@@ -10,8 +10,15 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sentinex_core.db.base import get_session
-from sentinex_core.db.repos import ScanRepo, AgentRepo, FindingRepo
-from sentinex_core.events.schema import EventEnvelope, StatePayload
+from sentinex_core.db.models import Event as EventModel
+from sentinex_core.db.repos import ScanRepo, AgentRepo, FindingRepo, EventRepo
+from sentinex_core.events.schema import (
+    EventEnvelope,
+    FindingPayload,
+    RiskUpdatePayload,
+    StatePayload,
+)
+from sentinex_core.scoring import RiskScoreEngine
 
 from .settings import worker_settings
 
@@ -313,7 +320,7 @@ class ScanOrchestrator:
         timeout = timeout or worker_settings.scan_timeout_seconds
         start = time.monotonic()
         while time.monotonic() - start < timeout:
-            container.reload()
+            await asyncio.to_thread(container.reload)
             if container.status in ("exited", "dead"):
                 exit_code = container.attrs["State"]["ExitCode"]
                 log.info(
@@ -351,7 +358,8 @@ class ScanOrchestrator:
         ready = False
         for attempt in range(30):
             try:
-                result = mock_db_container.exec_run(
+                result = await asyncio.to_thread(
+                    mock_db_container.exec_run,
                     "pg_isready -U mockuser -d mockdb",
                     demux=False,
                 )
@@ -385,38 +393,86 @@ class ScanOrchestrator:
         """
         Compute a 0-100 weighted risk score from all findings for this scan.
 
-        Formula: ``min(100, mean_severity_weight * 1.5)``
-
-        Severity weights
-        ----------------
-        critical  100
-        high       70
-        medium     40
-        low        10
-        info        0
+        Uses ``RiskScoreEngine`` for streaming computation and publishes
+        a ``finding`` event + ``risk_update`` event to Redis for each
+        finding so the live dashboard can animate the gauge in real time.
         """
-        severity_weights = {
-            "critical": 100,
-            "high": 70,
-            "medium": 40,
-            "low": 10,
-            "info": 0,
-        }
+        engine = RiskScoreEngine()
 
         async with get_session() as db:
             finding_repo = FindingRepo(db)
             findings = await finding_repo.list_by_scan(scan_id)
 
-            if not findings:
-                score = 0.0
-            else:
-                total_weight = sum(
-                    severity_weights.get(f.severity, 0) for f in findings
-                )
-                score = min(100.0, (total_weight / len(findings)) * 1.5)
+            db_events: list[EventModel] = []
 
+            for f in findings:
+                finding_seq = await self.redis.incr(f"scan:{scan_id}:seq") if self.redis is not None else 0
+                finding_ts = datetime.now(timezone.utc)
+                finding_event = EventEnvelope(
+                    scan_id=scan_id,
+                    seq=finding_seq,
+                    ts=finding_ts,
+                    type="finding",
+                    payload=FindingPayload(
+                        finding_id=str(f.id),
+                        category=f.category,
+                        rule_id=f.rule_id,
+                        severity=f.severity,
+                        title=f.title,
+                    ),
+                )
+                if self.redis is not None:
+                    await self.redis.publish(
+                        f"scan:{scan_id}:events",
+                        finding_event.model_dump_json(),
+                    )
+                db_events.append(EventModel(
+                    scan_id=scan_id,
+                    seq=finding_seq,
+                    ts=finding_ts,
+                    type=finding_event.type,
+                    payload=finding_event.payload.model_dump(),
+                ))
+
+                new_score, delta = engine.add_finding(
+                    severity=f.severity,
+                    category=f.category,
+                    rule_id=f.rule_id,
+                )
+                risk_seq = await self.redis.incr(f"scan:{scan_id}:seq") if self.redis is not None else 0
+                risk_ts = datetime.now(timezone.utc)
+                risk_event = EventEnvelope(
+                    scan_id=scan_id,
+                    seq=risk_seq,
+                    ts=risk_ts,
+                    type="risk_update",
+                    payload=RiskUpdatePayload(
+                        score=new_score,
+                        delta=delta,
+                        drivers=engine.top_drivers,
+                    ),
+                )
+                if self.redis is not None:
+                    await self.redis.publish(
+                        f"scan:{scan_id}:events",
+                        risk_event.model_dump_json(),
+                    )
+                db_events.append(EventModel(
+                    scan_id=scan_id,
+                    seq=risk_seq,
+                    ts=risk_ts,
+                    type=risk_event.type,
+                    payload=risk_event.payload.model_dump(),
+                ))
+
+            score = engine.current_score()
             scan_repo = ScanRepo(db)
             await scan_repo.update_risk_score(scan_id, score)
+
+            if db_events:
+                event_repo = EventRepo(db)
+                await event_repo.bulk_insert(db_events)
+
             await db.commit()
 
         return score
@@ -436,20 +492,25 @@ class ScanOrchestrator:
             state=new_state,
         )
 
+        now = datetime.now(timezone.utc)
         async with get_session() as db:
             repo = ScanRepo(db)
             scan = await repo.get_by_id(scan_id)
             old_state = scan.status if scan else "UNKNOWN"
-            await repo.update_status(scan_id, new_state)
+            await repo.update_status(
+                scan_id,
+                new_state,
+                started_at=now if new_state == "RUNNING" else None,
+                finished_at=now if new_state in ("DONE", "FAILED") else None,
+            )
             await db.commit()
 
+        seq = await self.redis.incr(f"scan:{scan_id}:seq") if self.redis is not None else 0
+        ts = datetime.now(timezone.utc)
         event = EventEnvelope(
             scan_id=scan_id,
-            # seq=0 is a sentinel; the EventRepo assigns the real sequence
-            # number on insert.  For pub/sub consumers the ordering comes
-            # from Redis stream delivery, not this field.
-            seq=0,
-            ts=datetime.now(timezone.utc),
+            seq=seq,
+            ts=ts,
             type="state",
             payload=StatePayload(
                 from_=old_state,
@@ -463,6 +524,18 @@ class ScanOrchestrator:
                 f"scan:{scan_id}:events",
                 event.model_dump_json(),
             )
+
+        async with get_session() as db:
+            event_repo = EventRepo(db)
+            db_event = EventModel(
+                scan_id=scan_id,
+                seq=seq,
+                ts=ts,
+                type=event.type,
+                payload=event.payload.model_dump(),
+            )
+            await event_repo.bulk_insert([db_event])
+            await db.commit()
 
     async def _fail(self, scan_id: uuid.UUID) -> None:
         """Convenience wrapper: transition to FAILED and persist."""

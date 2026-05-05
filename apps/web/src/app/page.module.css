@@ -1,0 +1,121 @@
+.hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 40px 0 32px;
+  gap: 24px;
+}
+
+.heroContent h1 {
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.gradient {
+  background: linear-gradient(135deg, #818cf8, #a78bfa, #c084fc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.heroSub {
+  color: var(--text-secondary);
+  font-size: 0.9375rem;
+  margin-top: 6px;
+}
+
+.heroActions {
+  flex-shrink: 0;
+}
+
+/* Stats */
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+@media (max-width: 768px) {
+  .statsGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.statCard {
+  padding: 20px;
+  text-align: center;
+}
+
+.statValue {
+  display: block;
+  font-size: 1.75rem;
+  font-weight: 700;
+  font-family: var(--font-geist-mono), monospace;
+  color: var(--text-primary);
+}
+
+.statLabel {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Section */
+.sectionTitle {
+  margin-bottom: 16px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+/* Scan list */
+.scanList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scanCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.scanCardLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.scanId {
+  font-size: 0.8125rem;
+  color: var(--accent);
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.scanCardRight {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.scanScore {
+  font-size: 1.25rem;
+  font-weight: 700;
+  font-family: var(--font-geist-mono), monospace;
+}
+
+.scanDate {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.emptyScans {
+  padding: 0;
+}

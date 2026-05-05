@@ -1,0 +1,102 @@
+.pageHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 0 24px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.backLink {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.backLink:hover {
+  color: var(--text-primary);
+}
+
+.title {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.scanId {
+  color: var(--accent);
+  font-size: 1rem;
+}
+
+.connectionStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.connectionLabel {
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+/* Panels */
+.streamPanel {
+  min-height: 500px;
+  max-height: 80vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.gaugeCard {
+  /* no extra padding — component handles it */
+}
+
+.findingsCard {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.findingsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.findingsHeader h3 {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.findingCount {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  font-family: var(--font-geist-mono), monospace;
+  color: var(--accent);
+  background: var(--accent-glow);
+  padding: 2px 8px;
+  border-radius: 9999px;
+}

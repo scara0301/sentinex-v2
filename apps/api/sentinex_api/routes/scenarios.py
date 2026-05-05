@@ -35,10 +35,8 @@ def _validate_yaml_dsl(yaml_str: str) -> tuple[bool, Optional[str]]:
         from sentinex_core.scenarios.dsl import validate_scenario_yaml
 
         validate_scenario_yaml(yaml_str)
-        # raises on invalid; if it returns, we're good
         return True, None
     except ImportError:
-        # sentinex_core DSL validator not yet available — fall back to yaml parse
         try:
             import yaml
 
@@ -77,7 +75,6 @@ async def create_scenario(
         "description": scenario.description,
         "tags": scenario.tags,
         "builtin": scenario.builtin,
-        "created_at": scenario.created_at,
     }
 
 
@@ -95,7 +92,6 @@ async def list_scenarios(
             "description": s.description,
             "tags": s.tags,
             "builtin": s.builtin,
-            "created_at": s.created_at,
         }
         for s in scenarios
     ]
@@ -114,8 +110,7 @@ async def get_scenario(
         "id": scenario.id,
         "name": scenario.name,
         "description": scenario.description,
-        "yaml_dsl": scenario.yaml_dsl,
+        "yaml": scenario.yaml,
         "tags": scenario.tags,
         "builtin": scenario.builtin,
-        "created_at": scenario.created_at,
     }

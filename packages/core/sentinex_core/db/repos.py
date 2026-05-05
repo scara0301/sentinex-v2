@@ -1,11 +1,11 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Agent, Event, Finding, Scan, Workspace
+from .models import Agent, Event, Finding, Scan, Scenario, Workspace
 
 
 class WorkspaceRepo:
@@ -23,7 +23,7 @@ class WorkspaceRepo:
             id=id or uuid.uuid4(),
             name=name,
             api_key_hash=api_key_hash,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         self._session.add(workspace)
         await self._session.flush()
@@ -65,7 +65,7 @@ class AgentRepo:
             version=version,
             manifest=manifest,
             bundle_uri=bundle_uri,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         self._session.add(agent)
         await self._session.flush()
@@ -107,7 +107,7 @@ class ScanRepo:
             status=status,
             scenario_ids=scenario_ids,
             config=config,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         self._session.add(scan)
         await self._session.flush()
@@ -210,7 +210,7 @@ class FindingRepo:
             evidence=evidence,
             cwe=cwe,
             remediation_id=remediation_id,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         self._session.add(finding)
         await self._session.flush()
@@ -230,3 +230,46 @@ class FindingRepo:
         stmt = stmt.order_by(Finding.created_at).limit(limit).offset(offset)
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+
+class ScenarioRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        workspace_id: Optional[uuid.UUID],
+        name: str,
+        description: Optional[str] = None,
+        yaml_dsl: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        builtin: bool = False,
+        id: Optional[uuid.UUID] = None,
+    ) -> Scenario:
+        scenario = Scenario(
+            id=id or uuid.uuid4(),
+            workspace_id=workspace_id,
+            slug=name.lower().replace(" ", "-"),
+            version=1,
+            name=name,
+            description=description,
+            yaml=yaml_dsl,
+            tags=tags or [],
+            builtin=builtin,
+        )
+        self._session.add(scenario)
+        await self._session.flush()
+        return scenario
+
+    async def list_all(self) -> Sequence[Scenario]:
+        result = await self._session.execute(
+            select(Scenario).order_by(Scenario.builtin.desc(), Scenario.name)
+        )
+        return result.scalars().all()
+
+    async def get_by_id(self, scenario_id: uuid.UUID) -> Optional[Scenario]:
+        result = await self._session.execute(
+            select(Scenario).where(Scenario.id == scenario_id)
+        )
+        return result.scalar_one_or_none()

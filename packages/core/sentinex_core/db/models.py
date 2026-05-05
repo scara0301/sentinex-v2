@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 from sqlalchemy import (
@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     UniqueConstraint,
     LargeBinary,
+    DateTime,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -22,13 +23,16 @@ from .base import Base
 
 class Workspace(Base):
     __tablename__ = "workspaces"
+    __table_args__ = (
+        UniqueConstraint("api_key_hash", name="uq_workspaces_api_key_hash"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     api_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     agents: Mapped[List["Agent"]] = relationship(
         back_populates="workspace", cascade="all, delete-orphan"
@@ -58,7 +62,7 @@ class Agent(Base):
     version: Mapped[int] = mapped_column(nullable=False)
     manifest: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     bundle_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     workspace: Mapped["Workspace"] = relationship(back_populates="agents")
     tools: Mapped[List["Tool"]] = relationship(
@@ -104,6 +108,10 @@ class Scenario(Base):
     version: Mapped[int] = mapped_column(nullable=False)
     yaml: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     parsed: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tags: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), nullable=True)
+    builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     workspace: Mapped[Optional["Workspace"]] = relationship(back_populates="scenarios")
 
@@ -126,9 +134,9 @@ class Scan(Base):
     )
     config: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     risk_score: Mapped[Optional[float]] = mapped_column(Numeric(5, 2), nullable=True)
-    started_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
-    created_at: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     workspace: Mapped["Workspace"] = relationship(back_populates="scans")
     agent: Mapped["Agent"] = relationship(back_populates="scans")
@@ -150,7 +158,7 @@ class Event(Base):
         UUID(as_uuid=True), ForeignKey("scans.id", ondelete="CASCADE"), primary_key=True
     )
     seq: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    ts: Mapped[datetime] = mapped_column(nullable=False)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     type: Mapped[str] = mapped_column(String(128), nullable=False)
     payload: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
@@ -177,7 +185,7 @@ class Finding(Base):
         ForeignKey("remediations.id", ondelete="SET NULL", deferrable=True, initially="DEFERRED"),
         nullable=True,
     )
-    created_at: Mapped[datetime] = mapped_column(nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
     remediation: Mapped[Optional["Remediation"]] = relationship(
@@ -217,13 +225,12 @@ class Badge(Base):
     )
     svg: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     grade: Mapped[str] = mapped_column(String(4), nullable=False)
-    signed_at: Mapped[datetime] = mapped_column(nullable=False)
+    signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     signature: Mapped[str] = mapped_column(Text, nullable=False)
 
     scan: Mapped["Scan"] = relationship(back_populates="badge")
 
 
-# Indexes
 Index("ix_agents_workspace", Agent.workspace_id)
 Index("ix_scans_workspace_created", Scan.workspace_id, Scan.created_at)
 Index("ix_events_scan_ts", Event.scan_id, Event.ts)
