@@ -40,4 +40,5 @@ build-sandbox:
 	docker build --target langchain -t sentinex/sandbox-langchain:latest packages/sandbox-image/
 	docker build --target mcp -t sentinex/sandbox-mcp:latest packages/sandbox-image/
 	docker build --target crewai -t sentinex/sandbox-crewai:latest packages/sandbox-image/
+	docker build --target autogen -t sentinex/sandbox-autogen:latest packages/sandbox-image/
 	docker build --target raw -t sentinex/sandbox-raw_python:latest packages/sandbox-image/

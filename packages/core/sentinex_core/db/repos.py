@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,11 @@ class WorkspaceRepo:
             select(Workspace).where(Workspace.api_key_hash == api_key_hash)
         )
         return result.scalar_one_or_none()
+
+    async def update_plan(self, workspace_id: uuid.UUID, plan: str) -> None:
+        await self._session.execute(
+            update(Workspace).where(Workspace.id == workspace_id).values(plan=plan)
+        )
 
 
 class AgentRepo:
@@ -159,6 +164,29 @@ class ScanRepo:
             .offset(offset)
         )
         return result.scalars().all()
+
+    async def count_created_since(
+        self, workspace_id: uuid.UUID, since: datetime
+    ) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Scan)
+            .where(Scan.workspace_id == workspace_id, Scan.created_at >= since)
+        )
+        return int(result.scalar_one())
+
+    async def count_active(
+        self, workspace_id: uuid.UUID, active_statuses: tuple[str, ...]
+    ) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Scan)
+            .where(
+                Scan.workspace_id == workspace_id,
+                Scan.status.in_(active_statuses),
+            )
+        )
+        return int(result.scalar_one())
 
 
 class EventRepo:

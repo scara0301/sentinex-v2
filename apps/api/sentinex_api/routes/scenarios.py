@@ -31,7 +31,16 @@ async def create_scenario(
     db: AsyncSession = Depends(get_db),
     workspace=Depends(get_current_workspace),
 ):
+    from sentinex_core.billing import get_plan
     from sentinex_core.scenarios import parse_scenario_yaml
+
+    plan = get_plan(workspace.plan)
+    if not plan.custom_scenarios:
+        raise HTTPException(
+            402,
+            f"Custom scenarios are not included in the '{plan.name}' plan. "
+            "Upgrade via POST /workspace/{id}/plan.",
+        )
 
     try:
         spec = parse_scenario_yaml(body.yaml_dsl)

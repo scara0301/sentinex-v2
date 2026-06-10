@@ -32,6 +32,7 @@ class Workspace(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     api_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan: Mapped[str] = mapped_column(String(32), nullable=False, default="free")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     agents: Mapped[List["Agent"]] = relationship(
