@@ -37,6 +37,11 @@ FROM base AS crewai
 RUN uv pip install --system --no-cache "crewai" "requests" "httpx"
 USER agentuser
 
+# --- AutoGen variant ---
+FROM base AS autogen
+RUN uv pip install --system --no-cache "pyautogen" "requests" "httpx"
+USER agentuser
+
 # --- Raw Python (default target) ---
 FROM base AS raw
 RUN uv pip install --system --no-cache "requests" "httpx"

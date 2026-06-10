@@ -136,6 +136,68 @@ enqueues a verification rescan.
 
 ---
 
+## Breakpoints & Replay (Sprint 5)
+
+While a scan is live, `POST .../scan/{sid}/control` drives the proxy like a
+debugger — intercepted tool responses are *held* and released on command:
+
+```jsonc
+{"action": "pause"}                          // hold every subsequent tool response
+{"action": "step"}                           // release exactly one held response
+{"action": "resume"}                         // release everything and continue
+{"action": "inject",                         // one-shot ad-hoc poisoning rule
+ "injection": {"tool": "stripe.*", "mode": "merge", "payload": {"note": "..."}}}
+```
+
+Each command is recorded as a `breakpoint` event and broadcast to dashboard
+clients. Replay is built into the event store: step through any finished
+scan with `GET .../scan/{sid}/events?from_seq=N&limit=K`, or send
+`{"resume_from": N}` over the live WebSocket.
+
+---
+
+## CI: GitHub Action (Sprint 5)
+
+Gate your agent deployments on a SENTINEX scan — the repo root ships a
+composite action (`action.yml`):
+
+```yaml
+- name: SENTINEX security scan
+  uses: your-org/sentinex-v2@main
+  with:
+    api-url: ${{ vars.SENTINEX_API_URL }}
+    api-key: ${{ secrets.SENTINEX_API_KEY }}
+    workspace-id: ${{ vars.SENTINEX_WORKSPACE_ID }}
+    agent-name: checkout-agent
+    bundle-path: agents/checkout_agent.py
+    fail-on-severity: high      # critical|high|medium|low|never
+    max-risk-score: "65"        # optional 0-100 gate
+```
+
+The action uploads the bundle, waits for the scan, writes a job-summary
+table with the badge and findings, exposes `scan-id` / `risk-score` /
+`grade` / `badge-url` outputs, and fails the build when the gate trips.
+
+---
+
+## Plans & Billing (Sprint 5)
+
+Workspaces carry a plan (`free` · `pro` · `enterprise`) that meters scans
+per month, concurrent scans, agents, and custom-scenario access. Quota
+violations return `402` (quota) or `429` (concurrency). Check usage with
+`GET /workspace/{id}/usage`; `POST /workspace/{id}/plan` is the
+integration point a payment provider's webhook handler calls to switch
+tiers.
+
+| | free | pro | enterprise |
+|---|---|---|---|
+| Scans / month | 10 | 200 | 10,000 |
+| Concurrent scans | 1 | 5 | 50 |
+| Agents | 3 | 25 | 1,000 |
+| Custom scenarios | — | ✅ | ✅ |
+
+---
+
 ## Getting Started
 
 ### Prerequisites
@@ -217,9 +279,9 @@ The WS connection uses exponential backoff reconnect and sends `resume_from: <la
 | LangChain / LangGraph | AST-based `@tool` + LLM class detection | ✅ Sprint 1 |
 | Raw Python | AST env-var + call extraction, fallback loader | ✅ Sprint 1 |
 | MCP servers | `mcp.json` config parser | ✅ Sprint 1 |
-| CrewAI | Multi-agent roster + delegation graph | ⚙️ Sprint 5 |
-| AutoGen | Agent graph + handoff extraction | ⚙️ Sprint 5 |
-| OpenAI Assistants | API-key + assistant ID wrapping | ⚙️ Sprint 5 |
+| CrewAI | Multi-agent roster + delegation graph (sequential/hierarchical) | ✅ Sprint 5 |
+| AutoGen | Agent graph + `initiate_chat` handoffs + GroupChat broadcast edges | ✅ Sprint 5 |
+| OpenAI Assistants | `assistant_id` form field or `assistant.json` (model + function tool schemas) | ✅ Sprint 5 |
 
 ---
 
@@ -265,6 +327,9 @@ Each scan runs in a fully isolated Docker environment:
 | `GET` | `/workspace/{id}/scan/{sid}/report` | `X-Api-Key` | ✅ Sprint 4 |
 | `POST` | `/workspace/{id}/scan/{sid}/fix` | `X-Api-Key` | ✅ Sprint 4 |
 | `GET` | `/badge/{scan_id}.svg` | — | ✅ Sprint 4 |
+| `POST` | `/workspace/{id}/scan/{sid}/control` | `X-Api-Key` | ✅ Sprint 5 |
+| `GET` | `/workspace/{id}/usage` | `X-Api-Key` | ✅ Sprint 5 |
+| `POST` | `/workspace/{id}/plan` | `X-Api-Key` | ✅ Sprint 5 |
 
 ---
 
@@ -276,7 +341,7 @@ Each scan runs in a fully isolated Docker environment:
 | **2 — Live Observer** | 4–5 | WebSocket fanout · Redis pub/sub · Next.js dashboard · RiskGauge · EventStream | ✅ Done |
 | **3 — Attack Scenarios** | 6–7 | YAML DSL · Scenario runner · 3 built-in scenarios · Response injection | ✅ Done |
 | **4 — Reporting** | 8–9 | Compliance PDF · Remediation patches · Embeddable SVG badges | ✅ Done |
-| **5 — Multi-agent & CI** | 10+ | CrewAI/AutoGen loaders · Breakpoint/replay · GitHub Action · SaaS billing | ⏳ |
+| **5 — Multi-agent & CI** | 10+ | CrewAI/AutoGen loaders · Breakpoint/replay · GitHub Action · SaaS billing | ✅ Done |
 
 ---
 

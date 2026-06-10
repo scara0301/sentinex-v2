@@ -8,6 +8,7 @@ import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sentinex_core.billing import get_plan
 from sentinex_core.db.repos import AgentRepo
 from ..deps import get_db, get_current_workspace
 from ..settings import settings
@@ -119,6 +120,7 @@ async def upload_agent(
     workspace_id: uuid.UUID,
     name: str = Form(...),
     framework: Optional[str] = Form(None),
+    assistant_id: Optional[str] = Form(None),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     workspace=Depends(get_current_workspace),
@@ -127,6 +129,16 @@ async def upload_agent(
         raise HTTPException(
             400,
             f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+        )
+
+    # Plan quota: distinct agent names count against max_agents (Sprint 5).
+    plan = get_plan(workspace.plan)
+    existing_names = {a.name for a in await AgentRepo(db).list_by_workspace(workspace_id)}
+    if name not in existing_names and len(existing_names) >= plan.max_agents:
+        raise HTTPException(
+            402,
+            f"Agent limit reached ({len(existing_names)}/{plan.max_agents} on the "
+            f"'{plan.name}' plan). Upgrade via POST /workspace/{{id}}/plan.",
         )
 
     bundle_root = Path(settings.upload_dir) / str(workspace_id) / name
@@ -149,7 +161,8 @@ async def upload_agent(
     try:
         from sentinex_core.manifest import normalize_upload
 
-        manifest = normalize_upload(extract_dir)
+        metadata = {"assistant_id": assistant_id, "name": name} if assistant_id else {}
+        manifest = normalize_upload(extract_dir, metadata=metadata)
         manifest_data = manifest.model_dump(mode="json")
         if not detected_framework:
             detected_framework = manifest.agent.framework

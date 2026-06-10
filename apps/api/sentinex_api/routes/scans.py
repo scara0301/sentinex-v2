@@ -1,12 +1,20 @@
+import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
+from sentinex_core.billing import (
+    ACTIVE_SCAN_STATUSES,
+    current_period_start,
+    get_plan,
+)
+from sentinex_core.db.models import Event as EventModel
 from sentinex_core.db.repos import (
     ScanRepo,
     AgentRepo,
@@ -14,6 +22,7 @@ from sentinex_core.db.repos import (
     FindingRepo,
     RemediationRepo,
 )
+from sentinex_core.events.schema import BreakpointPayload, EventEnvelope
 from ..deps import get_db, get_current_workspace
 from ..settings import settings
 
@@ -40,6 +49,23 @@ async def start_scan(
         raise HTTPException(404, "Agent not found")
 
     scan_repo = ScanRepo(db)
+
+    # Plan quota enforcement (Sprint 5)
+    plan = get_plan(workspace.plan)
+    used = await scan_repo.count_created_since(workspace_id, current_period_start())
+    if used >= plan.scans_per_month:
+        raise HTTPException(
+            402,
+            f"Monthly scan quota reached ({used}/{plan.scans_per_month} on the "
+            f"'{plan.name}' plan). Upgrade via POST /workspace/{{id}}/plan.",
+        )
+    active = await scan_repo.count_active(workspace_id, ACTIVE_SCAN_STATUSES)
+    if active >= plan.max_concurrent_scans:
+        raise HTTPException(
+            429,
+            f"Concurrent scan limit reached ({active}/{plan.max_concurrent_scans} "
+            f"on the '{plan.name}' plan). Wait for a running scan to finish.",
+        )
     scan = await scan_repo.create(
         workspace_id=workspace_id,
         agent_id=body.agent_id,
@@ -213,6 +239,83 @@ async def get_scan_report(
         {"status": "rendering", "detail": "Report queued; retry shortly."},
         status_code=202,
     )
+
+
+_CONTROLLABLE_STATUSES = {"RUNNING", "PAUSED", "SEEDING", "PROVISIONING"}
+
+
+class ControlRequest(BaseModel):
+    action: Literal["pause", "resume", "step", "inject"]
+    # For action=inject: {"tool": "stripe.*", "mode": "merge", "payload": {...}}
+    injection: Optional[dict] = None
+
+
+@router.post("/{scan_id}/control", status_code=202)
+async def control_scan(
+    request: Request,
+    workspace_id: uuid.UUID,
+    scan_id: uuid.UUID,
+    body: ControlRequest,
+    db: AsyncSession = Depends(get_db),
+    workspace=Depends(get_current_workspace),
+):
+    """
+    Breakpoint control for a live scan (Sprint 5).
+
+    The proxy holds intercepted tool responses while paused; ``step``
+    releases exactly one, ``resume`` releases all, and ``inject`` adds an
+    ad-hoc one-shot response-poisoning rule.
+    """
+    scan_repo = ScanRepo(db)
+    scan = await scan_repo.get_by_id(scan_id)
+    if not scan or scan.workspace_id != workspace_id:
+        raise HTTPException(404, "Scan not found")
+    if scan.status not in _CONTROLLABLE_STATUSES:
+        raise HTTPException(
+            409, f"Scan is not controllable in status {scan.status}"
+        )
+    if body.action == "inject" and not body.injection:
+        raise HTTPException(422, "action=inject requires an injection object")
+
+    redis = request.app.state.arq_pool
+
+    # 1. Tell the proxy.
+    await redis.publish(
+        f"scan:{scan_id}:control",
+        json.dumps({"action": body.action, "injection": body.injection}),
+    )
+
+    # 2. Record + broadcast a breakpoint event so dashboards see it.
+    seq = int(await redis.incr(f"scan:{scan_id}:seq"))
+    ts = datetime.now(timezone.utc)
+    envelope = EventEnvelope(
+        scan_id=scan_id,
+        seq=seq,
+        ts=ts,
+        type="breakpoint",
+        payload=BreakpointPayload(action=body.action, injection=body.injection),
+    )
+    await redis.publish(f"scan:{scan_id}:events", envelope.model_dump_json())
+    await EventRepo(db).bulk_insert(
+        [
+            EventModel(
+                scan_id=scan_id,
+                seq=seq,
+                ts=ts,
+                type="breakpoint",
+                payload=envelope.payload.model_dump(),
+            )
+        ]
+    )
+
+    # 3. Reflect pause state on the scan record.
+    if body.action == "pause":
+        await scan_repo.update_status(scan_id, "PAUSED")
+    elif body.action in ("resume", "step") and scan.status == "PAUSED":
+        await scan_repo.update_status(scan_id, "RUNNING")
+    await db.commit()
+
+    return {"status": "sent", "action": body.action, "seq": seq}
 
 
 class FixRequest(BaseModel):
