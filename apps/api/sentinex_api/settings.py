@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     secret_key: str = "change-me"
     sentinex_env: str = "development"
+    # Comma-separated list of allowed browser origins (the dashboard URL).
+    cors_origins: str = "http://localhost:3000"
     debug: bool = False
     upload_dir: str = "/tmp/sentinex/uploads"
     report_dir: str = "/tmp/sentinex/reports"  # shared volume with the worker

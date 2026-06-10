@@ -28,10 +28,15 @@ interface UseScanWSOptions {
   enabled?: boolean;
 }
 
+// Resolution order: explicit WS URL -> derived from the API URL
+// (https -> wss) -> dev fallback. `||` (not ??) so an empty inlined
+// env var falls through.
 const WS_BASE =
   typeof window !== "undefined"
-    ? (process.env.NEXT_PUBLIC_WS_URL ??
-      `ws://${window.location.hostname}:8000`)
+    ? process.env.NEXT_PUBLIC_WS_URL ||
+      (process.env.NEXT_PUBLIC_API_URL
+        ? process.env.NEXT_PUBLIC_API_URL.replace(/^http/, "ws")
+        : `ws://${window.location.hostname}:8000`)
     : "ws://localhost:8000";
 
 const MAX_RECONNECT_DELAY = 16000;

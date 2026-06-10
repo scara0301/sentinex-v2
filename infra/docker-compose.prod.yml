@@ -1,0 +1,133 @@
+# Production stack — run from the repo root:  make prod-up
+#
+# Differences from the dev stack:
+#   - no source bind mounts / --reload
+#   - Postgres and Redis are NOT published to the host
+#   - Caddy terminates TLS (automatic Let's Encrypt) for API + dashboard
+#   - all credentials and domains come from the repo-root .env
+#     (loaded via `docker compose --env-file .env`, see Makefile)
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sentinex
+      POSTGRES_USER: sentinex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - sentinex_pgdata:/var/lib/postgresql/data
+    networks: [sentinex]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinex -d sentinex"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - sentinex_redisdata:/data
+    networks: [sentinex]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: sentinex/api:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sentinex:${POSTGRES_PASSWORD:?}@postgres:5432/sentinex
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      SENTINEX_ENV: production
+      UPLOAD_DIR: /data/uploads
+      REPORT_DIR: /data/reports
+      CORS_ORIGINS: https://${SENTINEX_APP_DOMAIN:?set SENTINEX_APP_DOMAIN in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [sentinex]
+    volumes:
+      # Host bind (not a named volume): the worker mounts bundle paths into
+      # sandbox containers, and Docker resolves those binds on the host.
+      - ${SENTINEX_DATA_DIR:-/opt/sentinex/data}/uploads:/data/uploads
+      - sentinex_reports:/data/reports
+    command: >
+      uvicorn sentinex_api.main:app --host 0.0.0.0 --port 8000
+      --proxy-headers --forwarded-allow-ips=*
+
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/worker/Dockerfile
+    image: sentinex/worker:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sentinex:${POSTGRES_PASSWORD:?}@postgres:5432/sentinex
+      REDIS_URL: redis://redis:6379/0
+      DOCKER_HOST: unix:///var/run/docker.sock
+      REPORT_DIR: /data/reports
+      PROXY_EGRESS_NETWORK: sentinex
+      UPLOADS_CONTAINER_DIR: /data/uploads
+      UPLOADS_HOST_DIR: ${SENTINEX_DATA_DIR:-/opt/sentinex/data}/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [sentinex]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SENTINEX_DATA_DIR:-/opt/sentinex/data}/uploads:/data/uploads
+      - sentinex_reports:/data/reports
+
+  web:
+    build:
+      context: ../apps/web
+      args:
+        NEXT_PUBLIC_API_URL: https://${SENTINEX_API_DOMAIN:?set SENTINEX_API_DOMAIN in .env}
+        NEXT_PUBLIC_WS_URL: wss://${SENTINEX_API_DOMAIN:?}
+    image: sentinex/web:latest
+    restart: unless-stopped
+    networks: [sentinex]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SENTINEX_API_DOMAIN: ${SENTINEX_API_DOMAIN:?}
+      SENTINEX_APP_DOMAIN: ${SENTINEX_APP_DOMAIN:?}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - sentinex_caddy_data:/data
+      - sentinex_caddy_config:/config
+    depends_on:
+      - api
+      - web
+    networks: [sentinex]
+
+networks:
+  sentinex:
+    name: sentinex
+
+volumes:
+  sentinex_pgdata:
+  sentinex_redisdata:
+  sentinex_reports:
+  sentinex_caddy_data:
+  sentinex_caddy_config:
