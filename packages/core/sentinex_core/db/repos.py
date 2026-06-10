@@ -3,9 +3,10 @@ from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Agent, Event, Finding, Scan, Scenario, Workspace
+from .models import Agent, Badge, Event, Finding, Remediation, Scan, Scenario, Workspace
 
 
 class WorkspaceRepo:
@@ -168,6 +169,19 @@ class EventRepo:
         self._session.add_all(events)
         await self._session.flush()
 
+    async def bulk_upsert(self, rows: list[dict]) -> None:
+        """Insert event rows, ignoring (scan_id, seq) collisions.
+
+        Used for proxy-originated events where the sequence counter is
+        best-effort (a Redis hiccup can produce duplicate seqs).
+        """
+        if not rows:
+            return
+        stmt = pg_insert(Event).values(rows).on_conflict_do_nothing(
+            index_elements=["scan_id", "seq"]
+        )
+        await self._session.execute(stmt)
+
     async def list_by_scan(
         self,
         scan_id: uuid.UUID,
@@ -216,6 +230,21 @@ class FindingRepo:
         await self._session.flush()
         return finding
 
+    async def get_by_id(self, finding_id: uuid.UUID) -> Optional[Finding]:
+        result = await self._session.execute(
+            select(Finding).where(Finding.id == finding_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def set_remediation(
+        self, finding_id: uuid.UUID, remediation_id: uuid.UUID
+    ) -> None:
+        await self._session.execute(
+            update(Finding)
+            .where(Finding.id == finding_id)
+            .values(remediation_id=remediation_id)
+        )
+
     async def list_by_scan(
         self,
         scan_id: uuid.UUID,
@@ -243,18 +272,21 @@ class ScenarioRepo:
         name: str,
         description: Optional[str] = None,
         yaml_dsl: Optional[str] = None,
+        parsed: Optional[dict] = None,
         tags: Optional[list[str]] = None,
         builtin: bool = False,
+        slug: Optional[str] = None,
         id: Optional[uuid.UUID] = None,
     ) -> Scenario:
         scenario = Scenario(
             id=id or uuid.uuid4(),
             workspace_id=workspace_id,
-            slug=name.lower().replace(" ", "-"),
+            slug=slug or name.lower().replace(" ", "-"),
             version=1,
             name=name,
             description=description,
             yaml=yaml_dsl,
+            parsed=parsed,
             tags=tags or [],
             builtin=builtin,
         )
@@ -273,3 +305,123 @@ class ScenarioRepo:
             select(Scenario).where(Scenario.id == scenario_id)
         )
         return result.scalar_one_or_none()
+
+    async def get_by_ids(self, scenario_ids: list[uuid.UUID]) -> Sequence[Scenario]:
+        if not scenario_ids:
+            return []
+        result = await self._session.execute(
+            select(Scenario).where(Scenario.id.in_(scenario_ids))
+        )
+        return result.scalars().all()
+
+    async def get_builtin_by_slug(self, slug: str) -> Optional[Scenario]:
+        result = await self._session.execute(
+            select(Scenario).where(
+                Scenario.slug == slug,
+                Scenario.builtin.is_(True),
+                Scenario.workspace_id.is_(None),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def update_definition(
+        self,
+        scenario_id: uuid.UUID,
+        *,
+        name: str,
+        description: Optional[str],
+        yaml_dsl: str,
+        parsed: dict,
+        tags: list[str],
+    ) -> None:
+        await self._session.execute(
+            update(Scenario)
+            .where(Scenario.id == scenario_id)
+            .values(
+                name=name,
+                description=description,
+                yaml=yaml_dsl,
+                parsed=parsed,
+                tags=tags,
+            )
+        )
+
+
+class RemediationRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        finding_id: uuid.UUID,
+        diff: Optional[str] = None,
+        playbook_md: Optional[str] = None,
+        id: Optional[uuid.UUID] = None,
+    ) -> Remediation:
+        remediation = Remediation(
+            id=id or uuid.uuid4(),
+            finding_id=finding_id,
+            diff=diff,
+            playbook_md=playbook_md,
+            applied=False,
+        )
+        self._session.add(remediation)
+        await self._session.flush()
+        return remediation
+
+    async def get_by_id(self, remediation_id: uuid.UUID) -> Optional[Remediation]:
+        result = await self._session.execute(
+            select(Remediation).where(Remediation.id == remediation_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_by_finding_ids(
+        self, finding_ids: list[uuid.UUID]
+    ) -> Sequence[Remediation]:
+        if not finding_ids:
+            return []
+        result = await self._session.execute(
+            select(Remediation).where(Remediation.finding_id.in_(finding_ids))
+        )
+        return result.scalars().all()
+
+    async def mark_applied(
+        self, remediation_id: uuid.UUID, rescan_id: Optional[uuid.UUID]
+    ) -> None:
+        await self._session.execute(
+            update(Remediation)
+            .where(Remediation.id == remediation_id)
+            .values(applied=True, rescan_id=rescan_id)
+        )
+
+
+class BadgeRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get(self, scan_id: uuid.UUID) -> Optional[Badge]:
+        result = await self._session.execute(
+            select(Badge).where(Badge.scan_id == scan_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def create(
+        self,
+        *,
+        scan_id: uuid.UUID,
+        svg: bytes,
+        grade: str,
+        signed_at: datetime,
+        signature: str,
+    ) -> Badge:
+        badge = Badge(
+            scan_id=scan_id,
+            svg=svg,
+            grade=grade,
+            signed_at=signed_at,
+            signature=signature,
+        )
+        self._session.add(badge)
+        await self._session.flush()
+        return badge

@@ -1,5 +1,5 @@
-version: "3.9"
-
+# Run from the repo root:  make dev-up
+# (build contexts and bind mounts are relative to this file's directory)
 services:
   postgres:
     image: postgres:16-alpine
@@ -11,6 +11,7 @@ services:
       POSTGRES_PASSWORD: sentinex
     volumes:
       - sentinex_pgdata:/var/lib/postgresql/data
+    networks: [sentinex]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sentinex -d sentinex"]
       interval: 5s
@@ -22,6 +23,7 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    networks: [sentinex]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -31,59 +33,90 @@ services:
 
   api:
     build:
-      context: apps/api
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: sentinex/api:latest
     ports:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://sentinex:sentinex@postgres:5432/sentinex
       REDIS_URL: redis://redis:6379/0
+      UPLOAD_DIR: /data/uploads
+      REPORT_DIR: /data/reports
       DEBUG: "true"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks: [sentinex]
     volumes:
-      - ./apps/api:/app
-    command: uv run uvicorn sentinex_api.main:app --host 0.0.0.0 --port 8000 --reload
+      # Hot reload: source is installed editable, so mounting it live-updates.
+      - ../apps/api/sentinex_api:/app/apps/api/sentinex_api
+      - ../packages/core/sentinex_core:/app/packages/core/sentinex_core
+      # Agent bundles must live on a host bind so the worker can mount them
+      # into sandbox containers (bind paths resolve on the Docker host).
+      - ../.data/uploads:/data/uploads
+      - sentinex_reports:/data/reports
+    command: uvicorn sentinex_api.main:app --host 0.0.0.0 --port 8000 --reload
 
   worker:
     build:
-      context: apps/worker
+      context: ..
+      dockerfile: apps/worker/Dockerfile
+    image: sentinex/worker:latest
     environment:
       DATABASE_URL: postgresql+asyncpg://sentinex:sentinex@postgres:5432/sentinex
       REDIS_URL: redis://redis:6379/0
       DOCKER_HOST: unix:///var/run/docker.sock
+      REPORT_DIR: /data/reports
+      # Per-scan proxies join this network to reach Redis (the scan network
+      # itself is internal-only).
+      PROXY_EGRESS_NETWORK: sentinex
+      # Translate bundle paths (as seen inside this container) to host paths
+      # when bind-mounting them into sandbox containers.
+      UPLOADS_CONTAINER_DIR: /data/uploads
+      UPLOADS_HOST_DIR: ${PWD}/.data/uploads
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks: [sentinex]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    command: uv run python -m sentinex_worker.main
+      - ../apps/worker/sentinex_worker:/app/apps/worker/sentinex_worker
+      - ../packages/core/sentinex_core:/app/packages/core/sentinex_core
+      - ../.data/uploads:/data/uploads
+      - sentinex_reports:/data/reports
+    command: arq sentinex_worker.main.WorkerSettings
 
+  # Standing mocks for local poking; per-scan mocks are launched by the
+  # worker from the same sentinex/mocks:latest image (built here).
   mock-stripe:
     build:
-      context: apps/mocks
+      context: ../apps/mocks
+    image: sentinex/mocks:latest
     ports:
       - "4010:4010"
     environment:
       MOCK_PROVIDER: stripe
-    command: uv run uvicorn sentinex_mocks.stripe:app --host 0.0.0.0 --port 4010
+    networks: [sentinex]
 
   mock-slack:
     build:
-      context: apps/mocks
+      context: ../apps/mocks
+    image: sentinex/mocks:latest
     ports:
-      - "4011:4011"
+      - "4011:4010"
     environment:
       MOCK_PROVIDER: slack
-    command: uv run uvicorn sentinex_mocks.slack:app --host 0.0.0.0 --port 4011
+    networks: [sentinex]
 
   web:
     build:
-      context: apps/web
+      context: ../apps/web
+    image: sentinex/web:latest
     ports:
       - "3000:3000"
     environment:
@@ -91,6 +124,12 @@ services:
     depends_on:
       api:
         condition: service_started
+    networks: [sentinex]
+
+networks:
+  sentinex:
+    name: sentinex
 
 volumes:
   sentinex_pgdata:
+  sentinex_reports:

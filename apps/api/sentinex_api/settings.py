@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     sentinex_env: str = "development"
     debug: bool = False
     upload_dir: str = "/tmp/sentinex/uploads"
+    report_dir: str = "/tmp/sentinex/reports"  # shared volume with the worker
     max_upload_size_mb: int = 50
     scan_timeout_seconds: int = 600
     max_events_per_scan: int = 100_000

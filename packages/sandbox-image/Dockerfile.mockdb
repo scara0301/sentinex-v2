@@ -1,0 +1,8 @@
+# Seeded mock database for the scan sandbox. The postgres entrypoint runs
+# init.sql (honeypot PII, planted credentials, synthetic transactions) on
+# first boot of each per-scan container.
+#   docker build -f packages/sandbox-image/Dockerfile.mockdb \
+#     -t sentinex/mock-db:latest packages/sandbox-image/
+FROM postgres:16-alpine
+
+COPY seed/init.sql /docker-entrypoint-initdb.d/init.sql
