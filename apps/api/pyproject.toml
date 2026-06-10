@@ -16,6 +16,9 @@ dependencies = [
   "aiofiles>=23.0",
 ]
 
+[tool.uv.sources]
+sentinex-core = { workspace = true }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

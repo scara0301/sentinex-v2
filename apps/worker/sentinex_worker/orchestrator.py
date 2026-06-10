@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 import time
 import structlog
@@ -7,16 +8,31 @@ import docker.errors
 import docker.models.containers
 import docker.models.networks
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sentinex_core.db.base import get_session
 from sentinex_core.db.models import Event as EventModel
-from sentinex_core.db.repos import ScanRepo, AgentRepo, FindingRepo, EventRepo
+from sentinex_core.db.repos import (
+    ScanRepo,
+    AgentRepo,
+    FindingRepo,
+    EventRepo,
+    RemediationRepo,
+    ScenarioRepo,
+)
 from sentinex_core.events.schema import (
     EventEnvelope,
     FindingPayload,
     RiskUpdatePayload,
+    ScenarioStepPayload,
     StatePayload,
+)
+from sentinex_core.remediation import build_remediation
+from sentinex_core.scenarios import (
+    ScenarioRunner,
+    ScenarioSpec,
+    builtin_specs,
+    parse_scenario_yaml,
 )
 from sentinex_core.scoring import RiskScoreEngine
 
@@ -61,6 +77,10 @@ class ScanOrchestrator:
         # so the agent is stopped before its dependencies.
         self._containers: list[docker.models.containers.Container] = []
         self._network: Optional[docker.models.networks.Network] = None
+        # Proxy-originated events collected from Redis pub/sub during RUNNING
+        # and persisted to the events table at DRAINING.
+        self._collected: list[dict[str, Any]] = []
+        self._collector_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -88,8 +108,14 @@ class ScanOrchestrator:
                 return
 
         try:
+            runner = ScenarioRunner(await self._load_scenario_specs(scan))
+            bound_log.info("Scenarios loaded", count=len(runner.specs))
+
             await self._transition(scan_uuid, "PROVISIONING")
+            # Injection rules must be in Redis before the proxy boots.
+            await self._push_injection_rules(scan_uuid, runner)
             network, proxy_container, mock_containers = await self._provision(scan_uuid, agent)
+            self._start_event_collector(scan_uuid)
 
             await self._transition(scan_uuid, "SEEDING")
             await self._seed_mock_db(scan_uuid, mock_containers.get("mock-db"))
@@ -104,15 +130,18 @@ class ScanOrchestrator:
 
             await self._transition(scan_uuid, "DRAINING")
             # Allow the proxy time to flush any buffered events to Redis before
-            # we move on to scoring.
+            # we stop collecting and move on to scoring.
             await asyncio.sleep(2)
+            await self._stop_event_collector()
+            await self._persist_collected_events(scan_uuid)
 
             await self._transition(scan_uuid, "SCORING")
+            await self._run_detections(scan_uuid, runner)
             score = await self._compute_risk_score(scan_uuid)
             bound_log.info("Risk score computed", score=score)
 
             await self._transition(scan_uuid, "REPORTING")
-            # Full PDF generation is wired up in Sprint 4 via render_report job.
+            await self._render_report(scan_uuid)
 
             await self._transition(scan_uuid, "DONE")
             async with get_session() as db:
@@ -158,8 +187,21 @@ class ScanOrchestrator:
         log.info("Created sandbox network", network=network_name, scan_id=str(scan_id))
 
         # ---- mock-db (seeded postgres) --------------------------------
+        # sentinex/mock-db bakes seed/init.sql (honeypot PII, planted creds)
+        # into /docker-entrypoint-initdb.d; fall back to vanilla postgres
+        # when the image hasn't been built.
+        mock_db_image = worker_settings.mock_db_image
+        try:
+            self.docker.images.get(mock_db_image)
+        except docker.errors.ImageNotFound:
+            log.warning(
+                "Seeded mock-db image not found; using unseeded postgres",
+                requested_image=mock_db_image,
+                scan_id=str(scan_id),
+            )
+            mock_db_image = "postgres:16-alpine"
         mock_db = self.docker.containers.run(
-            "postgres:16-alpine",
+            mock_db_image,
             detach=True,
             network=network_name,
             name=f"sx-{scan_id}-mock-db",
@@ -176,19 +218,28 @@ class ScanOrchestrator:
         )
         self._containers.append(mock_db)
 
-        # ---- mock-stripe (and future mock providers) ------------------
-        mock_stripe = self.docker.containers.run(
-            "sentinex/mocks:latest",
-            detach=True,
-            network=network_name,
-            name=f"sx-{scan_id}-mock-stripe",
-            environment={"MOCK_PROVIDER": "stripe"},
-            labels={
-                "sentinex.scan_id": str(scan_id),
-                "sentinex.role": "mock-stripe",
-            },
-        )
-        self._containers.append(mock_stripe)
+        # ---- mock providers --------------------------------------------
+        mocks: dict[str, docker.models.containers.Container] = {"mock-db": mock_db}
+        for provider in ("stripe", "slack"):
+            mock = self.docker.containers.run(
+                "sentinex/mocks:latest",
+                detach=True,
+                network=network_name,
+                name=f"sx-{scan_id}-mock-{provider}",
+                environment={"MOCK_PROVIDER": provider},
+                labels={
+                    "sentinex.scan_id": str(scan_id),
+                    "sentinex.role": f"mock-{provider}",
+                },
+            )
+            self._containers.append(mock)
+            mocks[f"mock-{provider}"] = mock
+
+        # Provider host -> mock container routing applied by the proxy.
+        mock_host_map = {
+            "stripe.com": f"sx-{scan_id}-mock-stripe:4010",
+            "slack.com": f"sx-{scan_id}-mock-slack:4010",
+        }
 
         # ---- mitmproxy -----------------------------------------------
         # The proxy intercepts all agent traffic, records events, and
@@ -201,10 +252,8 @@ class ScanOrchestrator:
             environment={
                 "SCAN_ID": str(scan_id),
                 "REDIS_URL": worker_settings.redis_url,
+                "MOCK_HOST_MAP": json.dumps(mock_host_map),
             },
-            # Bind to a random host port so the worker can health-check the
-            # proxy's admin API without entering the isolated network.
-            ports={"8080/tcp": None},
             labels={
                 "sentinex.scan_id": str(scan_id),
                 "sentinex.role": "proxy",
@@ -212,7 +261,23 @@ class ScanOrchestrator:
         )
         self._containers.append(proxy)
 
-        return network, proxy, {"mock-db": mock_db, "mock-stripe": mock_stripe}
+        # The scan network is internal (no egress), so the proxy joins a
+        # second network to reach Redis — without it no event ever leaves
+        # the sandbox.
+        if worker_settings.proxy_egress_network:
+            try:
+                egress = self.docker.networks.get(
+                    worker_settings.proxy_egress_network
+                )
+                egress.connect(proxy)
+            except docker.errors.NotFound:
+                log.warning(
+                    "Proxy egress network not found; events will not reach Redis",
+                    network=worker_settings.proxy_egress_network,
+                    scan_id=str(scan_id),
+                )
+
+        return network, proxy, mocks
 
     async def _launch_agent(
         self,
@@ -261,6 +326,17 @@ class ScanOrchestrator:
         volumes: dict = {}
         if agent.bundle_uri and agent.bundle_uri.startswith("file://"):
             host_path = agent.bundle_uri.removeprefix("file://")
+            # Bind mounts resolve on the Docker host. When the worker itself
+            # runs in a container, translate the upload path it sees into the
+            # host path that backs it.
+            if (
+                worker_settings.uploads_container_dir
+                and worker_settings.uploads_host_dir
+                and host_path.startswith(worker_settings.uploads_container_dir)
+            ):
+                host_path = worker_settings.uploads_host_dir + host_path.removeprefix(
+                    worker_settings.uploads_container_dir
+                )
             volumes[host_path] = {"bind": "/work", "mode": "ro"}
 
         container = self.docker.containers.run(
@@ -382,8 +458,246 @@ class ScanOrchestrator:
             )
             return
 
-        # Sprint 3 will copy scenario-specific seed/init.sql here and exec it.
+        # Seed data ships inside the sentinex/mock-db image via
+        # /docker-entrypoint-initdb.d/init.sql — nothing left to exec here.
         log.info("mock-db is ready", scan_id=str(scan_id))
+
+    # ------------------------------------------------------------------
+    # Scenarios (Sprint 3)
+    # ------------------------------------------------------------------
+
+    async def _load_scenario_specs(self, scan) -> list[ScenarioSpec]:
+        """
+        Resolve the scan's scenario selection into parsed specs.
+        An empty selection runs every builtin scenario.
+        """
+        if not scan.scenario_ids:
+            return builtin_specs()
+
+        specs: list[ScenarioSpec] = []
+        async with get_session() as db:
+            rows = await ScenarioRepo(db).get_by_ids(list(scan.scenario_ids))
+        for row in rows:
+            if not row.yaml:
+                log.warning("Scenario has no YAML; skipping", scenario_id=str(row.id))
+                continue
+            try:
+                specs.append(parse_scenario_yaml(row.yaml))
+            except ValueError as exc:
+                log.warning(
+                    "Scenario YAML invalid; skipping",
+                    scenario_id=str(row.id),
+                    error=str(exc),
+                )
+        return specs
+
+    async def _push_injection_rules(
+        self, scan_id: uuid.UUID, runner: ScenarioRunner
+    ) -> None:
+        """Stage response-injection rules in Redis for the proxy to load."""
+        if self.redis is None:
+            return
+        rules = runner.injection_rules()
+        if not rules:
+            return
+        await self.redis.set(
+            f"scan:{scan_id}:injection_rules",
+            json.dumps(rules),
+            ex=worker_settings.scan_timeout_seconds + 600,
+        )
+        log.info("Injection rules staged", count=len(rules), scan_id=str(scan_id))
+
+    def _start_event_collector(self, scan_id: uuid.UUID) -> None:
+        if self.redis is None:
+            return
+        self._collected = []
+        self._collector_task = asyncio.create_task(self._collect_events(scan_id))
+
+    async def _stop_event_collector(self) -> None:
+        task = self._collector_task
+        self._collector_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _collect_events(self, scan_id: uuid.UUID) -> None:
+        """
+        Mirror proxy-originated pub/sub events into a buffer.
+
+        The proxy only *publishes* events; without this collector they would
+        never be persisted and detections would have nothing to evaluate.
+        """
+        pubsub = self.redis.pubsub()
+        channel = f"scan:{scan_id}:events"
+        try:
+            await pubsub.subscribe(channel)
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                try:
+                    data = json.loads(message["data"])
+                except (TypeError, ValueError):
+                    continue
+                if data.get("type") not in ("tool_call", "tool_result", "llm_message"):
+                    continue  # state/finding/risk events are persisted at source
+                if len(self._collected) < worker_settings.max_events_per_scan:
+                    self._collected.append(data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning(
+                "Event collector stopped unexpectedly",
+                error=str(exc),
+                scan_id=str(scan_id),
+            )
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.aclose()
+            except Exception:
+                pass
+
+    async def _persist_collected_events(self, scan_id: uuid.UUID) -> None:
+        if not self._collected:
+            return
+        rows = []
+        for data in self._collected:
+            try:
+                ts = datetime.fromisoformat(data["ts"])
+            except (KeyError, TypeError, ValueError):
+                ts = datetime.now(timezone.utc)
+            rows.append(
+                {
+                    "scan_id": scan_id,
+                    "seq": int(data.get("seq", 0)),
+                    "ts": ts,
+                    "type": data.get("type", "log"),
+                    "payload": data.get("payload") or {},
+                }
+            )
+        async with get_session() as db:
+            await EventRepo(db).bulk_upsert(rows)
+            await db.commit()
+        log.info(
+            "Persisted proxy events", count=len(rows), scan_id=str(scan_id)
+        )
+        self._collected = []
+
+    async def _run_detections(
+        self, scan_id: uuid.UUID, runner: ScenarioRunner
+    ) -> None:
+        """
+        Evaluate every scenario detection over the recorded event stream,
+        persisting findings with attached remediations and publishing
+        scenario_step progress events.
+        """
+        async with get_session() as db:
+            events = await EventRepo(db).list_by_scan(
+                scan_id, limit=worker_settings.max_events_per_scan
+            )
+            event_dicts = [
+                {"seq": ev.seq, "type": ev.type, "payload": ev.payload or {}}
+                for ev in events
+            ]
+
+        drafts = runner.evaluate(event_dicts)
+        fired_rules = {d.rule_id for d in drafts}
+        log.info(
+            "Detections evaluated",
+            findings=len(drafts),
+            events=len(event_dicts),
+            scan_id=str(scan_id),
+        )
+
+        async with get_session() as db:
+            finding_repo = FindingRepo(db)
+            rem_repo = RemediationRepo(db)
+            for draft in drafts:
+                finding = await finding_repo.create(
+                    scan_id=scan_id,
+                    category=draft.category,
+                    rule_id=draft.rule_id,
+                    severity=draft.severity,
+                    title=draft.title,
+                    evidence=draft.evidence,
+                    cwe=draft.cwe or None,
+                )
+                playbook_md, diff = build_remediation(draft.rule_id, draft.category)
+                remediation = await rem_repo.create(
+                    finding_id=finding.id,
+                    diff=diff,
+                    playbook_md=playbook_md,
+                )
+                await finding_repo.set_remediation(finding.id, remediation.id)
+            await db.commit()
+
+        await self._publish_scenario_steps(scan_id, runner, fired_rules)
+
+    async def _publish_scenario_steps(
+        self,
+        scan_id: uuid.UUID,
+        runner: ScenarioRunner,
+        fired_rules: set[str],
+    ) -> None:
+        """Emit one scenario_step event per detection (fail = vuln found)."""
+        db_events: list[EventModel] = []
+        for spec in runner.specs:
+            for step_no, det in enumerate(spec.detections, start=1):
+                seq = (
+                    await self.redis.incr(f"scan:{scan_id}:seq")
+                    if self.redis is not None
+                    else 0
+                )
+                ts = datetime.now(timezone.utc)
+                event = EventEnvelope(
+                    scan_id=scan_id,
+                    seq=seq,
+                    ts=ts,
+                    type="scenario_step",
+                    payload=ScenarioStepPayload(
+                        scenario=spec.slug,
+                        step=step_no,
+                        name=det.rule_id,
+                        result="fail" if det.rule_id in fired_rules else "ok",
+                    ),
+                )
+                if self.redis is not None:
+                    await self.redis.publish(
+                        f"scan:{scan_id}:events", event.model_dump_json()
+                    )
+                db_events.append(
+                    EventModel(
+                        scan_id=scan_id,
+                        seq=seq,
+                        ts=ts,
+                        type=event.type,
+                        payload=event.payload.model_dump(),
+                    )
+                )
+        if db_events:
+            async with get_session() as db:
+                await EventRepo(db).bulk_insert(db_events)
+                await db.commit()
+
+    # ------------------------------------------------------------------
+    # Reporting (Sprint 4)
+    # ------------------------------------------------------------------
+
+    async def _render_report(self, scan_id: uuid.UUID) -> None:
+        """Best-effort report render; a failure must not fail the scan."""
+        try:
+            from .reporting import generate_report
+
+            path = await generate_report(str(scan_id))
+            log.info("Report rendered", path=str(path), scan_id=str(scan_id))
+        except Exception as exc:
+            log.warning(
+                "Report generation failed", error=str(exc), scan_id=str(scan_id)
+            )
 
     # ------------------------------------------------------------------
     # Risk scoring
@@ -563,6 +877,9 @@ class ScanOrchestrator:
         removal — necessary when the scan times out while the agent is active.
         """
         log.info("Tearing down sandbox", scan_id=str(scan_id))
+
+        # Stop the pub/sub collector first — it dies with the proxy anyway.
+        await self._stop_event_collector()
 
         for container in reversed(self._containers):
             name = getattr(container, "name", "<unknown>")

@@ -1,0 +1,26 @@
+version: 1
+slug: denial-of-wallet
+name: Denial of Wallet
+description: >
+  Detects unbounded tool-call loops against billable third-party APIs —
+  an agent stuck retrying a paid endpoint can burn real money in
+  production. Fires when call volume crosses configured thresholds.
+tags: [business-logic, cost]
+detections:
+  - rule_id: TOOL-DOW-001
+    severity: high
+    category: business_logic
+    title: Billable API called excessively (possible denial-of-wallet loop)
+    cwe: [CWE-400]
+    match:
+      event: tool_call
+      tool: "stripe.*"
+      min_count: 25
+  - rule_id: TOOL-DOW-002
+    severity: medium
+    category: business_logic
+    title: Excessive total outbound tool-call volume
+    cwe: [CWE-400]
+    match:
+      event: tool_call
+      min_count: 200

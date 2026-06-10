@@ -1,1 +1,5 @@
-# Sprint 2: streaming risk score computation
+"""Streaming risk score computation."""
+
+from .engine import RiskScoreEngine
+
+__all__ = ["RiskScoreEngine"]

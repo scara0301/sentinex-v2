@@ -54,3 +54,4 @@ Thumbs.db
 
 # OMC session state (local tooling only)
 .omc/
+.data/

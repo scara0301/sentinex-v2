@@ -25,46 +25,28 @@ class ScenarioCreate(BaseModel):
         return v
 
 
-def _validate_yaml_dsl(yaml_str: str) -> tuple[bool, Optional[str]]:
-    """
-    Validate scenario YAML via sentinex_core DSL validator.
-    Returns (is_valid, error_message).
-    Falls back to basic YAML parse check if sentinex_core is unavailable.
-    """
-    try:
-        from sentinex_core.scenarios.dsl import validate_scenario_yaml
-
-        validate_scenario_yaml(yaml_str)
-        return True, None
-    except ImportError:
-        try:
-            import yaml
-
-            yaml.safe_load(yaml_str)
-            return True, None
-        except Exception as exc:
-            return False, str(exc)
-    except Exception as exc:
-        return False, str(exc)
-
-
 @router.post("", status_code=201)
 async def create_scenario(
     body: ScenarioCreate,
     db: AsyncSession = Depends(get_db),
     workspace=Depends(get_current_workspace),
 ):
-    is_valid, error = _validate_yaml_dsl(body.yaml_dsl)
-    if not is_valid:
-        raise HTTPException(422, f"Invalid scenario DSL: {error}")
+    from sentinex_core.scenarios import parse_scenario_yaml
+
+    try:
+        spec = parse_scenario_yaml(body.yaml_dsl)
+    except ValueError as exc:
+        raise HTTPException(422, f"Invalid scenario DSL: {exc}") from exc
 
     repo = ScenarioRepo(db)
     scenario = await repo.create(
         workspace_id=workspace.id,
         name=body.name,
-        description=body.description,
+        slug=spec.slug,
+        description=body.description or spec.description,
         yaml_dsl=body.yaml_dsl,
-        tags=body.tags,
+        parsed=spec.model_dump(mode="json"),
+        tags=body.tags or spec.tags,
         builtin=False,
     )
     await db.commit()

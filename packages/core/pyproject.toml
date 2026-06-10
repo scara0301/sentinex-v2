@@ -10,6 +10,7 @@ dependencies = [
   "pydantic-settings>=2.3",
   "python-ulid>=2.0",
   "structlog>=24.0",
+  "pyyaml>=6.0",
 ]
 
 [build-system]

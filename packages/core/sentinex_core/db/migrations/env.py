@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -10,6 +11,11 @@ from sentinex_core.db.models import Base  # noqa: F401 - needed for autogenerate
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# DATABASE_URL takes precedence over the placeholder in alembic.ini.
+_env_url = os.environ.get("DATABASE_URL")
+if _env_url:
+    config.set_main_option("sqlalchemy.url", _env_url)
 
 target_metadata = Base.metadata
 
