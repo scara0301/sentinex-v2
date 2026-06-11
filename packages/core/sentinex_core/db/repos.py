@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -175,6 +175,22 @@ class ScanRepo:
         )
         return int(result.scalar_one())
 
+    async def fail_stale(self, active_statuses: tuple[str, ...]) -> int:
+        """Mark scans stuck in a mid-flight status as FAILED.
+
+        Called at worker startup: any scan in an actively-running status has
+        no live orchestrator (the worker that owned it died), so it would
+        otherwise consume its workspace's concurrency quota forever.
+        Returns the number of scans updated.
+        """
+        now = datetime.now(timezone.utc)
+        result = await self._session.execute(
+            update(Scan)
+            .where(Scan.status.in_(active_statuses))
+            .values(status="FAILED", finished_at=now)
+        )
+        return int(result.rowcount or 0)
+
     async def count_active(
         self, workspace_id: uuid.UUID, active_statuses: tuple[str, ...]
     ) -> int:
@@ -325,6 +341,20 @@ class ScenarioRepo:
     async def list_all(self) -> Sequence[Scenario]:
         result = await self._session.execute(
             select(Scenario).order_by(Scenario.builtin.desc(), Scenario.name)
+        )
+        return result.scalars().all()
+
+    async def list_visible(self, workspace_id: uuid.UUID) -> Sequence[Scenario]:
+        """Builtin (platform-wide) scenarios plus the caller's own custom ones."""
+        result = await self._session.execute(
+            select(Scenario)
+            .where(
+                or_(
+                    Scenario.builtin.is_(True),
+                    Scenario.workspace_id == workspace_id,
+                )
+            )
+            .order_by(Scenario.builtin.desc(), Scenario.name)
         )
         return result.scalars().all()
 

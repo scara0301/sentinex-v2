@@ -18,6 +18,19 @@ from .dsl import DetectionSpec, ScenarioSpec
 
 MAX_EVIDENCE_SEQS = 25
 
+# Payload fields that carry agent-controlled / tool-returned data. Matching is
+# restricted to these so transport metadata (host, tool, chain_id) can't cause
+# false-positive honeypot/args_contain hits.
+_SEARCHABLE_FIELDS = ("args", "content", "response")
+
+
+def _searchable_blob(payload: dict[str, Any]) -> str:
+    """Serialize only the data-bearing fields of an event payload."""
+    subset = {k: payload[k] for k in _SEARCHABLE_FIELDS if k in payload}
+    if not subset:
+        return ""
+    return json.dumps(subset, default=str)
+
 
 class ScenarioRunner:
     def __init__(self, specs: list[ScenarioSpec]) -> None:
@@ -144,7 +157,7 @@ class ScenarioRunner:
         if m.args_contain_honeypot:
             needles.extend(honeypots.ALL)
         if needles:
-            blob = json.dumps(payload, default=str)
+            blob = _searchable_blob(payload)
             if not any(n in blob for n in needles):
                 return False
 

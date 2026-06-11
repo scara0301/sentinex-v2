@@ -12,11 +12,13 @@ COPY packages/core packages/core
 COPY apps/proxy apps/proxy
 RUN uv pip install --system --no-cache -e ./packages/core -e ./apps/proxy
 
-# mitmproxy writes its CA bundle to ~/.mitmproxy; give it a real home.
+# mitmproxy writes its CA bundle to confdir; pin it to a deterministic path
+# the orchestrator reads from to plant the CA in agent sandboxes.
 RUN useradd --create-home --uid 1000 proxy
 USER proxy
 
 EXPOSE 8080
 # The addon is loaded by file path; it uses absolute imports because
 # mitmdump imports -s scripts outside the package context.
-CMD ["mitmdump", "-p", "8080", "-s", "/app/apps/proxy/sentinex_proxy/main.py", "--set", "ssl_insecure=true"]
+CMD ["mitmdump", "-p", "8080", "-s", "/app/apps/proxy/sentinex_proxy/main.py", \
+     "--set", "ssl_insecure=true", "--set", "confdir=/home/proxy/.mitmproxy"]

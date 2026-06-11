@@ -9,6 +9,21 @@ from ..schema import AgentManifest, AgentInfo, ToolDefinition, LoaderMeta, Instr
 _MCP_CONFIG_NAMES = {"mcp.json", "claude_desktop_config.json", ".mcp.json"}
 
 
+def _sanitize_server_cfg(cfg: Any) -> Any:
+    """Redact secret values from a server config before it enters the manifest.
+
+    MCP ``env`` blocks routinely hold API keys/tokens; we keep the variable
+    names (useful signal) but never persist their values.
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+    sanitized = dict(cfg)
+    env = sanitized.get("env")
+    if isinstance(env, dict):
+        sanitized["env"] = {key: "***redacted***" for key in env}
+    return sanitized
+
+
 def _find_mcp_config(bundle: UploadBundle) -> tuple[Path, dict[str, Any]] | None:
     root = bundle.root
     candidates: list[Path] = []
@@ -50,13 +65,17 @@ class MCPLoader(AgentLoader):
             mcp_servers: dict[str, Any] = data.get("mcpServers", {})
 
             for server_name, server_cfg in mcp_servers.items():
-                mcp_servers_raw.append({"name": server_name, **server_cfg})
+                safe_cfg = _sanitize_server_cfg(server_cfg)
+                entry = {"name": server_name}
+                if isinstance(safe_cfg, dict):
+                    entry.update(safe_cfg)
+                mcp_servers_raw.append(entry)
                 tools.append(
                     ToolDefinition(
                         name=server_name,
                         source=f"mcp:{server_name}",
                         side_effects=["network"],
-                        args_schema=server_cfg if isinstance(server_cfg, dict) else {},
+                        args_schema=safe_cfg if isinstance(safe_cfg, dict) else {},
                     )
                 )
 

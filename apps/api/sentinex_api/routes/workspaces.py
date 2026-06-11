@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from sentinex_core.db.repos import WorkspaceRepo
-from ..deps import get_db
+from ..deps import get_db, get_current_workspace
 
 router = APIRouter()
 
@@ -33,9 +33,17 @@ async def create_workspace(body: WorkspaceCreate, db: AsyncSession = Depends(get
 
 
 @router.get("/{workspace_id}")
-async def get_workspace(workspace_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    repo = WorkspaceRepo(db)
-    ws = await repo.get_by_id(workspace_id)
-    if not ws:
+async def get_workspace(
+    workspace_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    workspace=Depends(get_current_workspace),
+):
+    # The API key authenticates a single workspace; you may only read your own.
+    if workspace.id != workspace_id:
         raise HTTPException(404, "Workspace not found")
-    return {"id": ws.id, "name": ws.name, "created_at": ws.created_at}
+    return {
+        "id": workspace.id,
+        "name": workspace.name,
+        "plan": workspace.plan,
+        "created_at": workspace.created_at,
+    }

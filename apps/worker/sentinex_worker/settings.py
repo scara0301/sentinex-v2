@@ -14,6 +14,9 @@ class WorkerSettings(BaseSettings):
     scan_timeout_seconds: int = 600
     max_events_per_scan: int = 100_000
     proxy_port: int = 8080
+    # Max concurrent scans this worker process will run. Scale beyond this by
+    # running additional worker containers (jobs are distributed via Redis).
+    max_jobs: int = 10
     mock_db_image: str = "sentinex/mock-db:latest"  # falls back to postgres:16-alpine
     # Extra (non-internal) network the proxy joins so it can reach Redis.
     # On the dev compose stack this is the "sentinex" network.

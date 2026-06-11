@@ -14,7 +14,6 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-import redis as sync_redis
 import redis.asyncio as aioredis
 import structlog
 from mitmproxy import http
@@ -35,7 +34,6 @@ log = structlog.get_logger()
 class SentinexAddon:
     def __init__(self):
         self.redis: aioredis.Redis = None
-        self.sync_redis: sync_redis.Redis = None
         self.seq = 0  # local fallback when Redis is unreachable
         self.chain_tracker = ChainTracker()
         self.injector = InjectionEngine()
@@ -53,17 +51,13 @@ class SentinexAddon:
             log.warning("Invalid MOCK_HOST_MAP JSON; mock routing disabled")
             self._mock_hosts = {}
 
-    def running(self):
+    async def running(self):
+        # mitmproxy hooks run on this asyncio loop, so a single async Redis
+        # client serves both publishing and rule loading.
         self.redis = aioredis.from_url(proxy_settings.redis_url)
+        await self._ensure_rules_loaded()
         try:
-            self.sync_redis = sync_redis.Redis.from_url(proxy_settings.redis_url)
-            self.injector.load(self.sync_redis, proxy_settings.scan_id)
-        except Exception as e:
-            log.warning("Sync Redis unavailable", error=str(e))
-        try:
-            self._control_task = asyncio.get_event_loop().create_task(
-                self._listen_control()
-            )
+            self._control_task = asyncio.ensure_future(self._listen_control())
         except Exception as e:
             log.warning("Breakpoint control listener not started", error=str(e))
         log.info("Proxy addon running", scan_id=proxy_settings.scan_id)
@@ -72,7 +66,7 @@ class SentinexAddon:
         if self._control_task is not None:
             self._control_task.cancel()
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    async def request(self, flow: http.HTTPFlow) -> None:
         classification = classify_request(flow)
         if not classification:
             return  # pass through unrecognized traffic
@@ -89,7 +83,7 @@ class SentinexAddon:
 
         event = EventEnvelope(
             scan_id=self._scan_uuid(),
-            seq=self._next_seq(),
+            seq=await self._next_seq(),
             ts=datetime.now(timezone.utc),
             type="tool_call",
             payload=ToolCallPayload(
@@ -102,25 +96,24 @@ class SentinexAddon:
             ),
         )
         self._pending[chain_id] = (time.monotonic(), event)
-        self._publish_sync(event)
+        await self._publish(event)
 
-    def response(self, flow: http.HTTPFlow) -> None:
+    async def response(self, flow: http.HTTPFlow) -> None:
         chain_id = flow.metadata.get("chain_id")
-        if not chain_id:
+        if not chain_id or flow.response is None:
             return
 
         req_ts, req_event = self._pending.pop(chain_id, (None, None))
         duration_ms = int((time.monotonic() - (req_ts or time.monotonic())) * 1000)
 
         # Late-load injection rules if Redis wasn't ready at startup.
-        if not self.injector.loaded and self.sync_redis is not None:
-            self.injector.load(self.sync_redis, proxy_settings.scan_id)
+        await self._ensure_rules_loaded()
         injected = self.injector.apply(flow, flow.metadata.get("tool"))
 
         classification = classify_response(flow)
         event = EventEnvelope(
             scan_id=req_event.scan_id if req_event else self._scan_uuid(),
-            seq=self._next_seq(),
+            seq=await self._next_seq(),
             ts=datetime.now(timezone.utc),
             type="tool_result",
             payload=ToolResultPayload(
@@ -131,7 +124,11 @@ class SentinexAddon:
                 injected=injected,
             ),
         )
-        self._publish_sync(event)
+        await self._publish(event)
+        # Maintains in-proxy call-chain state (sensitive-value harvesting, call
+        # counts). Authoritative detection runs post-scan in ScenarioRunner over
+        # the persisted event stream, so the returned rule hints are advisory
+        # and intentionally not acted on here.
         self.chain_tracker.record_call(chain_id, req_event, event)
 
         # Breakpoint: hold the (already recorded) response until released.
@@ -139,6 +136,17 @@ class SentinexAddon:
             flow.intercept()
             self._intercepted.append(flow)
             log.info("Flow intercepted at breakpoint", tool=flow.metadata.get("tool"))
+
+    async def _ensure_rules_loaded(self) -> None:
+        if self.injector.loaded or self.redis is None:
+            return
+        try:
+            raw = await self.redis.get(
+                f"scan:{proxy_settings.scan_id}:injection_rules"
+            )
+            self.injector.load_from_raw(raw)
+        except Exception as e:
+            log.warning("Failed to load injection rules", error=str(e))
 
     # ------------------------------------------------------------------
     # Breakpoint control (Sprint 5)
@@ -215,34 +223,27 @@ class SentinexAddon:
             return uuid.UUID(proxy_settings.scan_id)
         return uuid.uuid4()
 
-    def _next_seq(self) -> int:
+    async def _next_seq(self) -> int:
         # Share the scan-wide sequence counter with the orchestrator so
         # (scan_id, seq) stays unique across both event producers.
-        if self.sync_redis is not None:
+        if self.redis is not None:
             try:
                 return int(
-                    self.sync_redis.incr(f"scan:{proxy_settings.scan_id}:seq")
+                    await self.redis.incr(f"scan:{proxy_settings.scan_id}:seq")
                 )
             except Exception as e:
                 log.warning("Redis seq INCR failed; using local seq", error=str(e))
         self.seq += 1
         return self.seq
 
-    def _publish_sync(self, event: EventEnvelope) -> None:
-        """Publish to Redis from mitmproxy's sync hooks."""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self._publish(event))
-            else:
-                loop.run_until_complete(self._publish(event))
-        except Exception as e:
-            log.warning("Failed to publish event", error=str(e))
-
     async def _publish(self, event: EventEnvelope) -> None:
-        if self.redis:
+        if self.redis is None:
+            return
+        try:
             channel = f"scan:{event.scan_id}:events"
             await self.redis.publish(channel, event.model_dump_json())
+        except Exception as e:
+            log.warning("Failed to publish event", error=str(e))
 
 
 addons = [SentinexAddon()]

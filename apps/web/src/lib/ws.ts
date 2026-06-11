@@ -25,8 +25,13 @@ interface UseScanWSOptions {
   workspaceId: string;
   scanId: string;
   onEvent: (event: WSEvent) => void;
+  apiKey?: string;
   enabled?: boolean;
 }
+
+// Matches the API's WS auth subprotocol marker (scans_ws.py). Sending the key
+// as a subprotocol keeps it out of the URL and server access logs.
+const API_KEY_SUBPROTOCOL = "sentinex-api-key";
 
 // Resolution order: explicit WS URL -> derived from the API URL
 // (https -> wss) -> dev fallback. `||` (not ??) so an empty inlined
@@ -46,6 +51,7 @@ export function useScanWS({
   workspaceId,
   scanId,
   onEvent,
+  apiKey,
   enabled = true,
 }: UseScanWSOptions) {
   const [connectionState, setConnectionState] =
@@ -88,7 +94,9 @@ export function useScanWS({
     setConnectionState("connecting");
 
     const url = `${WS_BASE}/workspace/${workspaceId}/scan/${scanId}/live`;
-    const ws = new WebSocket(url);
+    const ws = apiKey
+      ? new WebSocket(url, [API_KEY_SUBPROTOCOL, apiKey])
+      : new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -140,7 +148,7 @@ export function useScanWS({
     ws.onerror = () => {
       ws.close();
     };
-  }, [workspaceId, scanId, enabled, cleanup]);
+  }, [workspaceId, scanId, apiKey, enabled, cleanup]);
 
   useEffect(() => {
     if (enabled) {

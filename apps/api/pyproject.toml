@@ -14,6 +14,7 @@ dependencies = [
   "python-jose[cryptography]>=3.3",
   "passlib[bcrypt]>=1.7",
   "aiofiles>=23.0",
+  "detect-secrets>=1.5",
 ]
 
 [tool.uv.sources]

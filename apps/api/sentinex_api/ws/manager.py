@@ -20,9 +20,11 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._rooms: dict[str, set[WebSocket]] = {}
 
-    async def connect(self, scan_id: str, ws: WebSocket) -> None:
+    async def connect(
+        self, scan_id: str, ws: WebSocket, subprotocol: str | None = None
+    ) -> None:
         """Accept the WebSocket and add it to the scan's room."""
-        await ws.accept()
+        await ws.accept(subprotocol=subprotocol)
         room = self._rooms.setdefault(scan_id, set())
         room.add(ws)
         log.info("ws_connect", scan_id=scan_id, clients=len(room))

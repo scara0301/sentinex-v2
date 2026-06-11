@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from sentinex_core.db.base import get_session
 from sentinex_core.db.repos import (
@@ -55,39 +56,63 @@ async def apply_fix(ctx, scan_id: str, remediation_id: str):
             bound_log.error("Agent bundle missing on disk", path=str(bundle_root))
             return
 
+        # Snapshot the values we need into locals: a rollback below would expire
+        # these ORM instances, and a lazy reload on an async session crashes.
+        diff = remediation.diff
+        agent_ws_id = agent.workspace_id
+        agent_name = agent.name
+        agent_framework = agent.framework
+        agent_manifest = agent.manifest
+        scan_ws_id = scan.workspace_id
+        scan_scenario_ids = list(scan.scenario_ids or [])
+        scan_config = scan.config
+
         # Copy the bundle and patch the copy — never mutate the original.
         new_root = bundle_root.parent / f"{bundle_root.name}-fix-{remediation_id[:8]}"
         if new_root.exists():
             shutil.rmtree(new_root)
         shutil.copytree(bundle_root, new_root)
         try:
-            changed = apply_unified_diff(new_root, remediation.diff)
+            changed = apply_unified_diff(new_root, diff)
         except PatchError as exc:
             shutil.rmtree(new_root, ignore_errors=True)
             bound_log.error("Patch failed to apply", error=str(exc))
             return
         bound_log.info("Patch applied", files=changed)
 
-        # Register the patched bundle as the next agent version.
-        siblings = await agent_repo.list_by_workspace(agent.workspace_id)
-        next_version = max(
-            (a.version for a in siblings if a.name == agent.name), default=0
-        ) + 1
-        patched_agent = await agent_repo.create(
-            workspace_id=agent.workspace_id,
-            name=agent.name,
-            framework=agent.framework,
-            version=next_version,
-            manifest=agent.manifest,
-            bundle_uri=f"file://{new_root}",
-        )
+        # Register the patched bundle as the next agent version. Retry on the
+        # (workspace, name, version) unique constraint in case a concurrent
+        # apply_fix for the same agent grabbed the version first.
+        patched_agent = None
+        for _ in range(5):
+            siblings = await agent_repo.list_by_workspace(agent_ws_id)
+            next_version = max(
+                (a.version for a in siblings if a.name == agent_name), default=0
+            ) + 1
+            try:
+                patched_agent = await agent_repo.create(
+                    workspace_id=agent_ws_id,
+                    name=agent_name,
+                    framework=agent_framework,
+                    version=next_version,
+                    manifest=agent_manifest,
+                    bundle_uri=f"file://{new_root}",
+                )
+                await db.flush()
+                break
+            except IntegrityError:
+                await db.rollback()
+        if patched_agent is None:
+            shutil.rmtree(new_root, ignore_errors=True)
+            bound_log.error("Could not allocate a patched agent version")
+            return
 
         # Rescan with the same scenario selection to verify the fix.
         rescan = await ScanRepo(db).create(
-            workspace_id=scan.workspace_id,
+            workspace_id=scan_ws_id,
             agent_id=patched_agent.id,
-            scenario_ids=list(scan.scenario_ids or []),
-            config=scan.config,
+            scenario_ids=scan_scenario_ids,
+            config=scan_config,
         )
         await rem_repo.mark_applied(rem_uuid, rescan.id)
         await db.commit()
