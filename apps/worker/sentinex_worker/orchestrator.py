@@ -8,6 +8,7 @@ import docker.errors
 import docker.models.containers
 import docker.models.networks
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from sentinex_core.db.base import get_session
@@ -81,6 +82,8 @@ class ScanOrchestrator:
         # and persisted to the events table at DRAINING.
         self._collected: list[dict[str, Any]] = []
         self._collector_task: Optional[asyncio.Task] = None
+        # Path to the extracted proxy CA cert (cleaned up on teardown).
+        self._ca_cert_path: Optional[Path] = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -111,6 +114,14 @@ class ScanOrchestrator:
             runner = ScenarioRunner(await self._load_scenario_specs(scan))
             bound_log.info("Scenarios loaded", count=len(runner.specs))
 
+            # Give the shared (scan_id, seq) counter a TTL so it can't leak in
+            # Redis forever; teardown deletes it explicitly on the happy path.
+            if self.redis is not None:
+                ttl = worker_settings.scan_timeout_seconds + 600
+                await self.redis.set(
+                    f"scan:{scan_uuid}:seq", 0, ex=ttl, nx=True
+                )
+
             await self._transition(scan_uuid, "PROVISIONING")
             # Injection rules must be in Redis before the proxy boots.
             await self._push_injection_rules(scan_uuid, runner)
@@ -121,8 +132,9 @@ class ScanOrchestrator:
             await self._seed_mock_db(scan_uuid, mock_containers.get("mock-db"))
 
             await self._transition(scan_uuid, "RUNNING")
+            ca_cert_path = await self._extract_proxy_ca(scan_uuid, proxy_container)
             agent_container = await self._launch_agent(
-                scan_uuid, agent, network, proxy_container
+                scan_uuid, agent, network, proxy_container, ca_cert_path
             )
             self._containers.append(agent_container)
 
@@ -279,12 +291,70 @@ class ScanOrchestrator:
 
         return network, proxy, mocks
 
+    @staticmethod
+    def _host_path(container_path: str) -> str:
+        """Translate a worker-container path to the backing Docker-host path.
+
+        Bind mounts resolve on the host, so when the worker itself runs in a
+        container its local paths must be rewritten to the host paths that
+        back them. A no-op when the translation settings are unset (worker
+        running directly on the host).
+        """
+        cd = worker_settings.uploads_container_dir
+        hd = worker_settings.uploads_host_dir
+        if cd and hd and container_path.startswith(cd):
+            return hd + container_path[len(cd):]
+        return container_path
+
+    async def _extract_proxy_ca(
+        self,
+        scan_id: uuid.UUID,
+        proxy_container: docker.models.containers.Container,
+    ) -> Optional[str]:
+        """Read the proxy's generated CA cert and write it to a path the agent
+        container can bind-mount. Returns the worker-local path, or None.
+
+        Without the CA in the agent's trust store, any ``https://`` call the
+        agent makes through the proxy fails TLS verification and goes
+        unrecorded — so this is best-effort but important for coverage.
+        """
+        ca_pem: Optional[bytes] = None
+        for _ in range(30):
+            try:
+                res = await asyncio.to_thread(
+                    proxy_container.exec_run,
+                    "cat /home/proxy/.mitmproxy/mitmproxy-ca-cert.pem",
+                    demux=False,
+                )
+                if res.exit_code == 0 and res.output and b"BEGIN CERTIFICATE" in res.output:
+                    ca_pem = res.output
+                    break
+            except Exception as exc:
+                log.debug("CA read attempt failed", error=str(exc), scan_id=str(scan_id))
+            await asyncio.sleep(1)
+
+        if not ca_pem:
+            log.warning(
+                "Could not extract proxy CA; HTTPS tool calls may go unrecorded",
+                scan_id=str(scan_id),
+            )
+            return None
+
+        base = worker_settings.uploads_container_dir or "/tmp/sentinex"
+        cert_dir = Path(base) / ".sentinex-certs"
+        cert_dir.mkdir(parents=True, exist_ok=True)
+        cert_path = cert_dir / f"{scan_id}-ca.pem"
+        cert_path.write_bytes(ca_pem)
+        self._ca_cert_path = cert_path
+        return str(cert_path)
+
     async def _launch_agent(
         self,
         scan_id: uuid.UUID,
         agent,
         network: docker.models.networks.Network,
         proxy_container: docker.models.containers.Container,
+        ca_cert_path: Optional[str] = None,
     ) -> docker.models.containers.Container:
         """
         Launch the agent inside a hardened container with traffic routed
@@ -302,7 +372,9 @@ class ScanOrchestrator:
         ------------
         HTTP_PROXY / HTTPS_PROXY are set to the proxy container's name on the
         internal network.  Provider base-URL overrides redirect LLM SDK calls
-        through the proxy so every prompt/completion is recorded.
+        through the proxy so every prompt/completion is recorded. The proxy CA
+        (when extracted) is mounted read-only and trusted via the standard
+        CA-bundle env vars so HTTPS calls are intercepted, not rejected.
         """
         framework = agent.framework
         image = f"sentinex/sandbox-{framework}:latest"
@@ -325,34 +397,35 @@ class ScanOrchestrator:
         # fetched by the agent entrypoint via its own credentials.
         volumes: dict = {}
         if agent.bundle_uri and agent.bundle_uri.startswith("file://"):
-            host_path = agent.bundle_uri.removeprefix("file://")
-            # Bind mounts resolve on the Docker host. When the worker itself
-            # runs in a container, translate the upload path it sees into the
-            # host path that backs it.
-            if (
-                worker_settings.uploads_container_dir
-                and worker_settings.uploads_host_dir
-                and host_path.startswith(worker_settings.uploads_container_dir)
-            ):
-                host_path = worker_settings.uploads_host_dir + host_path.removeprefix(
-                    worker_settings.uploads_container_dir
-                )
+            host_path = self._host_path(agent.bundle_uri.removeprefix("file://"))
             volumes[host_path] = {"bind": "/work", "mode": "ro"}
+
+        environment = {
+            "HTTP_PROXY": proxy_addr,
+            "HTTPS_PROXY": proxy_addr,
+            # Redirect major LLM provider SDKs through the proxy so every
+            # API call is captured and replayed in findings.
+            "OPENAI_BASE_URL": f"http://sx-{scan_id}-proxy:{worker_settings.proxy_port}/openai",
+            "ANTHROPIC_BASE_URL": f"http://sx-{scan_id}-proxy:{worker_settings.proxy_port}/anthropic",
+            "SCAN_ID": str(scan_id),
+        }
+
+        if ca_cert_path:
+            ca_mount = "/opt/sentinex/mitmproxy-ca.pem"
+            volumes[self._host_path(ca_cert_path)] = {"bind": ca_mount, "mode": "ro"}
+            # Cover requests/httpx, Python ssl, curl, and Node so HTTPS through
+            # the proxy is trusted rather than rejected.
+            environment["REQUESTS_CA_BUNDLE"] = ca_mount
+            environment["SSL_CERT_FILE"] = ca_mount
+            environment["CURL_CA_BUNDLE"] = ca_mount
+            environment["NODE_EXTRA_CA_CERTS"] = ca_mount
 
         container = self.docker.containers.run(
             image,
             detach=True,
             network=network.name,
             name=f"sx-{scan_id}-agent",
-            environment={
-                "HTTP_PROXY": proxy_addr,
-                "HTTPS_PROXY": proxy_addr,
-                # Redirect major LLM provider SDKs through the proxy so every
-                # API call is captured and replayed in findings.
-                "OPENAI_BASE_URL": f"http://sx-{scan_id}-proxy:{worker_settings.proxy_port}/openai",
-                "ANTHROPIC_BASE_URL": f"http://sx-{scan_id}-proxy:{worker_settings.proxy_port}/anthropic",
-                "SCAN_ID": str(scan_id),
-            },
+            environment=environment,
             volumes=volumes,
             mem_limit=worker_settings.sandbox_mem_limit,
             cpu_quota=worker_settings.sandbox_cpu_quota,
@@ -916,3 +989,25 @@ class ScanOrchestrator:
 
         self._containers.clear()
         self._network = None
+
+        # Remove the extracted CA cert file.
+        if self._ca_cert_path is not None:
+            try:
+                self._ca_cert_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._ca_cert_path = None
+
+        # Drop the per-scan Redis keys (seq counter + staged injection rules).
+        if self.redis is not None:
+            try:
+                await self.redis.delete(
+                    f"scan:{scan_id}:seq",
+                    f"scan:{scan_id}:injection_rules",
+                )
+            except Exception as exc:
+                log.debug(
+                    "Failed to delete scan Redis keys",
+                    error=str(exc),
+                    scan_id=str(scan_id),
+                )

@@ -234,14 +234,18 @@ async def get_scan_report(
     if scan.status != "DONE":
         raise HTTPException(409, f"Scan is not finished (status={scan.status})")
 
-    await request.app.state.arq_pool.enqueue_job("render_report", str(scan_id))
+    # Dedupe: a fixed job id means repeated polls don't pile up renders.
+    await request.app.state.arq_pool.enqueue_job(
+        "render_report", str(scan_id), _job_id=f"render_report:{scan_id}"
+    )
     return JSONResponse(
         {"status": "rendering", "detail": "Report queued; retry shortly."},
         status_code=202,
     )
 
 
-_CONTROLLABLE_STATUSES = {"RUNNING", "PAUSED", "SEEDING", "PROVISIONING"}
+# Breakpoints only make sense once the proxy exists and the agent is running.
+_CONTROLLABLE_STATUSES = {"RUNNING", "PAUSED"}
 
 
 class ControlRequest(BaseModel):

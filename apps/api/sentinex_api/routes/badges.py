@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sentinex_core.badges import grade_for_score, render_badge_svg, sign_badge
@@ -50,12 +51,21 @@ async def get_badge(
     grade = grade_for_score(score)
     svg = render_badge_svg(grade, score=score)
     signed_at = datetime.now(timezone.utc)
-    await badge_repo.create(
-        scan_id=scan_id,
-        svg=svg.encode(),
-        grade=grade,
-        signed_at=signed_at,
-        signature=sign_badge(settings.secret_key, str(scan_id), grade, signed_at),
-    )
-    await db.commit()
+    try:
+        await badge_repo.create(
+            scan_id=scan_id,
+            svg=svg.encode(),
+            grade=grade,
+            signed_at=signed_at,
+            signature=sign_badge(settings.secret_key, str(scan_id), grade, signed_at),
+        )
+        await db.commit()
+    except IntegrityError:
+        # A concurrent request created the badge first — serve the stored one.
+        await db.rollback()
+        existing = await badge_repo.get(scan_id)
+        if existing and existing.svg:
+            return Response(
+                existing.svg, media_type="image/svg+xml", headers=_SVG_HEADERS
+            )
     return Response(svg, media_type="image/svg+xml", headers=_SVG_HEADERS)

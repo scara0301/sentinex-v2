@@ -1,5 +1,5 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-const DEFAULT_API_KEY = process.env.NEXT_PUBLIC_SENTINEX_API_KEY ?? "";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const DEFAULT_API_KEY = process.env.NEXT_PUBLIC_SENTINEX_API_KEY || "";
 
 export interface Workspace {
   id: string;

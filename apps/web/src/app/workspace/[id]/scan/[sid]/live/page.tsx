@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useState } from "react";
-import { useParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 import { useScanWS, type WSEvent } from "@/lib/ws";
@@ -20,14 +20,13 @@ interface FindingEntry {
   title: string;
 }
 
-export default function ScanLivePage() {
+const STORAGE_KEY = "sentinex_api_key";
+
+function ScanLiveView() {
   const params = useParams();
+  const searchParams = useSearchParams();
   const workspaceId = params.id as string;
   const scanId = params.sid as string;
-
-  if (!workspaceId || !scanId) {
-    return <main className="page-container"><p>Invalid scan URL.</p></main>;
-  }
 
   const [events, setEvents] = useState<WSEvent[]>([]);
   const [scanStatus, setScanStatus] = useState("PENDING");
@@ -35,6 +34,20 @@ export default function ScanLivePage() {
   const [riskDelta, setRiskDelta] = useState(0);
   const [riskDrivers, setRiskDrivers] = useState<string[]>([]);
   const [findings, setFindings] = useState<FindingEntry[]>([]);
+  const [apiKey, setApiKey] = useState<string>("");
+
+  // Resolve the API key (client-only): build-time env, persisted value, or a
+  // ?api_key= deep link (which we then persist for reconnects).
+  useEffect(() => {
+    const fromQuery = searchParams.get("api_key");
+    if (fromQuery) {
+      window.localStorage.setItem(STORAGE_KEY, fromQuery);
+      setApiKey(fromQuery);
+      return;
+    }
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    setApiKey(stored || process.env.NEXT_PUBLIC_SENTINEX_API_KEY || "");
+  }, [searchParams]);
 
   const handleEvent = useCallback((event: WSEvent) => {
     setEvents((prev) => [...prev, event]);
@@ -69,6 +82,8 @@ export default function ScanLivePage() {
     workspaceId,
     scanId,
     onEvent: handleEvent,
+    apiKey,
+    enabled: Boolean(workspaceId && scanId && apiKey),
   });
 
   return (
@@ -89,10 +104,22 @@ export default function ScanLivePage() {
               className={`connection-dot ${connectionState}`}
               title={connectionState}
             />
-            <span className={styles.connectionLabel}>{connectionState}</span>
+            <span className={styles.connectionLabel}>
+              {apiKey ? connectionState : "no api key"}
+            </span>
           </div>
         </div>
       </div>
+
+      {!apiKey && (
+        <div className="glass-card" style={{ padding: "1rem", marginBottom: "1rem" }}>
+          <p>
+            No API key found. Append <code>?api_key=&lt;your key&gt;</code> to this
+            URL (it will be remembered on this device) or set{" "}
+            <code>NEXT_PUBLIC_SENTINEX_API_KEY</code> at build time.
+          </p>
+        </div>
+      )}
 
       <div className="grid-dashboard">
         <div className={`glass-card ${styles.streamPanel}`}>
@@ -121,5 +148,15 @@ export default function ScanLivePage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function ScanLivePage() {
+  return (
+    <Suspense
+      fallback={<main className="page-container"><p>Loading scan…</p></main>}
+    >
+      <ScanLiveView />
+    </Suspense>
   );
 }

@@ -214,7 +214,10 @@ async def upload_agent(
 async def list_agents(
     workspace_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    workspace=Depends(get_current_workspace),
 ):
+    if workspace.id != workspace_id:
+        raise HTTPException(404, "Workspace not found")
     repo = AgentRepo(db)
     agents = await repo.list_by_workspace(workspace_id)
     return [
@@ -233,7 +236,10 @@ async def get_agent(
     workspace_id: uuid.UUID,
     agent_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    workspace=Depends(get_current_workspace),
 ):
+    if workspace.id != workspace_id:
+        raise HTTPException(404, "Workspace not found")
     repo = AgentRepo(db)
     agent = await repo.get_by_id(agent_id)
     if not agent or agent.workspace_id != workspace_id:

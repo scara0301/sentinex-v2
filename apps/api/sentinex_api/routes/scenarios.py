@@ -2,6 +2,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, field_validator
 
@@ -48,17 +49,23 @@ async def create_scenario(
         raise HTTPException(422, f"Invalid scenario DSL: {exc}") from exc
 
     repo = ScenarioRepo(db)
-    scenario = await repo.create(
-        workspace_id=workspace.id,
-        name=body.name,
-        slug=spec.slug,
-        description=body.description or spec.description,
-        yaml_dsl=body.yaml_dsl,
-        parsed=spec.model_dump(mode="json"),
-        tags=body.tags or spec.tags,
-        builtin=False,
-    )
-    await db.commit()
+    try:
+        scenario = await repo.create(
+            workspace_id=workspace.id,
+            name=body.name,
+            slug=spec.slug,
+            description=body.description or spec.description,
+            yaml_dsl=body.yaml_dsl,
+            parsed=spec.model_dump(mode="json"),
+            tags=body.tags or spec.tags,
+            builtin=False,
+        )
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            409, f"A scenario with slug '{spec.slug}' already exists in this workspace"
+        ) from exc
 
     return {
         "id": scenario.id,
@@ -72,10 +79,11 @@ async def create_scenario(
 @router.get("")
 async def list_scenarios(
     db: AsyncSession = Depends(get_db),
+    workspace=Depends(get_current_workspace),
 ):
-    """Return all scenarios — both builtin (platform-wide) and workspace custom ones."""
+    """Builtin (platform-wide) scenarios plus the caller's own custom ones."""
     repo = ScenarioRepo(db)
-    scenarios = await repo.list_all()
+    scenarios = await repo.list_visible(workspace.id)
     return [
         {
             "id": s.id,
@@ -92,10 +100,14 @@ async def list_scenarios(
 async def get_scenario(
     scenario_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    workspace=Depends(get_current_workspace),
 ):
     repo = ScenarioRepo(db)
     scenario = await repo.get_by_id(scenario_id)
     if not scenario:
+        raise HTTPException(404, "Scenario not found")
+    # Only builtin scenarios or the caller's own are visible.
+    if not scenario.builtin and scenario.workspace_id != workspace.id:
         raise HTTPException(404, "Scenario not found")
     return {
         "id": scenario.id,

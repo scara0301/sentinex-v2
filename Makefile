@@ -1,5 +1,6 @@
-.PHONY: dev-up dev-down dev-logs migrate test-unit test-integration test-e2e \
-	lint fmt build-sandbox build-scan-images
+.PHONY: dev-up dev-down dev-logs prod-up prod-down prod-logs prod-migrate \
+	migrate test-unit test-integration test-e2e lint fmt build-sandbox \
+	build-scan-images
 
 # Per-scan images (proxy, mocks, seeded mock-db) are launched by the worker
 # via the Docker socket, so they must exist on the host before scans run.
@@ -17,6 +18,21 @@ dev-down:
 
 dev-logs:
 	docker compose -f infra/docker-compose.dev.yml logs -f
+
+# --- production (see DEPLOY.md) --------------------------------------------
+
+prod-up: build-scan-images
+	docker compose --env-file .env -f infra/docker-compose.prod.yml up -d --build
+
+prod-down:
+	docker compose --env-file .env -f infra/docker-compose.prod.yml down
+
+prod-logs:
+	docker compose --env-file .env -f infra/docker-compose.prod.yml logs -f
+
+prod-migrate:
+	docker compose --env-file .env -f infra/docker-compose.prod.yml exec api \
+		sh -c "cd /app/packages/core && alembic upgrade head"
 
 migrate:
 	cd packages/core && uv run alembic upgrade head

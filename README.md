@@ -226,6 +226,12 @@ pnpm dev                       # http://localhost:3000
 > `docker build -f apps/api/Dockerfile .`) so the local `sentinex-core`
 > workspace package resolves. The dev compose file handles this for you.
 
+### Deploy to production
+
+A single VM with Docker is all you need — Caddy terminates TLS, and
+`make prod-up` / `make prod-migrate` bring up the hardened stack in
+`infra/docker-compose.prod.yml`. Full guide: **[DEPLOY.md](DEPLOY.md)**.
+
 ### Scan an agent end-to-end
 
 ```bash

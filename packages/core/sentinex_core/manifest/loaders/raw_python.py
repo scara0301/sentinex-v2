@@ -110,18 +110,9 @@ class RawPythonLoader(AgentLoader):
                             )
                         )
 
-                # Top-level requests calls (outside tool functions)
+                # LLM client instantiations
                 if isinstance(node, ast.Call):
                     func = node.func
-                    # requests.get / requests.post at module level
-                    if isinstance(func, ast.Attribute) and func.attr in (
-                        "get", "post", "put", "patch", "delete", "request"
-                    ):
-                        if isinstance(func.value, ast.Name) and func.value.id in ("requests", "httpx"):
-                            # Captured via tool body above; warn at module level
-                            pass
-
-                    # LLM client instantiations
                     func_name = None
                     if isinstance(func, ast.Name):
                         func_name = func.id

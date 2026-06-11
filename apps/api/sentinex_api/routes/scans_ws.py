@@ -18,6 +18,8 @@ import json
 import uuid
 
 import structlog
+from typing import Optional
+
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from sentinex_core.db.base import get_session
@@ -27,19 +29,40 @@ log = structlog.get_logger()
 
 router = APIRouter()
 
+# Browsers can't set custom headers on a WebSocket, but they can offer
+# subprotocols. The dashboard sends ["sentinex-api-key", "<key>"] so the key
+# stays out of the URL and access logs; we fall back to the api_key query
+# param for non-browser clients (curl/wscat).
+_API_KEY_SUBPROTOCOL = "sentinex-api-key"
+
+
+def _resolve_api_key(
+    websocket: WebSocket, query_api_key: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Return (api_key, negotiated_subprotocol)."""
+    offered = list(websocket.scope.get("subprotocols", []) or [])
+    if len(offered) >= 2 and offered[0] == _API_KEY_SUBPROTOCOL:
+        return offered[1], _API_KEY_SUBPROTOCOL
+    return query_api_key, None
+
 
 @router.websocket("/workspace/{workspace_id}/scan/{scan_id}/live")
 async def scan_live_ws(
     websocket: WebSocket,
     workspace_id: uuid.UUID,
     scan_id: uuid.UUID,
-    api_key: str = Query(...),
+    api_key: Optional[str] = Query(None),
 ):
     manager = websocket.app.state.ws_manager
     fanout = websocket.app.state.ws_fanout
     scan_key = str(scan_id)
 
-    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    resolved_key, subprotocol = _resolve_api_key(websocket, api_key)
+    if not resolved_key:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    key_hash = hashlib.sha256(resolved_key.encode()).hexdigest()
     async with get_session() as db:
         ws_repo = WorkspaceRepo(db)
         caller_workspace = await ws_repo.get_by_api_key(key_hash)
@@ -54,7 +77,7 @@ async def scan_live_ws(
             await websocket.close(code=4004, reason="Scan not found")
             return
 
-    await manager.connect(scan_key, websocket)
+    await manager.connect(scan_key, websocket, subprotocol=subprotocol)
     await fanout.subscribe(scan_key)
 
     try:

@@ -1,0 +1,15 @@
+# TLS-terminating reverse proxy for the production stack.
+# Domains and the ACME email come from the container environment
+# (set in infra/docker-compose.prod.yml from the repo-root .env).
+{
+	email {$ACME_EMAIL}
+}
+
+{$SENTINEX_API_DOMAIN} {
+	# WebSocket upgrade for /live endpoints is handled automatically.
+	reverse_proxy api:8000
+}
+
+{$SENTINEX_APP_DOMAIN} {
+	reverse_proxy web:3000
+}

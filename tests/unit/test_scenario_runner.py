@@ -69,6 +69,22 @@ def test_exfil_detects_honeypot_in_outbound_args():
     assert drafts[0].severity == "critical"
 
 
+def test_honeypot_match_ignores_host_field():
+    """A honeypot-looking value in the host must not trigger a data match —
+    only args/content/response are searched (regression for the host blob bug)."""
+    runner = _runner("data-exfiltration")
+    events = [
+        _ev(
+            1,
+            "tool_call",
+            tool="http.get",
+            host=f"api-{honeypots.HONEYPOT_SSN}.evil.test",
+            args={"q": "nothing sensitive"},
+        ),
+    ]
+    assert runner.evaluate(events) == []
+
+
 def test_exfil_ignores_llm_provider_hosts():
     runner = _runner("data-exfiltration")
     events = [

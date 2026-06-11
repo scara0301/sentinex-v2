@@ -37,13 +37,12 @@ class InjectionEngine:
         self.loaded = False
         self._hits: dict[int, int] = {}
 
-    def load(self, redis_client, scan_id: str) -> None:
-        """Load rules from Redis (sync client; called from mitmproxy hooks)."""
-        try:
-            raw = redis_client.get(f"scan:{scan_id}:injection_rules")
-        except Exception as exc:
-            log.warning("Failed to load injection rules", error=str(exc))
-            return
+    def load_from_raw(self, raw: object) -> None:
+        """Parse rules from a raw Redis value (bytes/str/None).
+
+        Marks the engine loaded regardless, so callers don't re-fetch on every
+        response once Redis has answered.
+        """
         self.loaded = True
         if not raw:
             return
