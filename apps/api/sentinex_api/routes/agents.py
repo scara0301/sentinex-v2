@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sentinex_core.billing import get_plan
 from sentinex_core.db.repos import AgentRepo
-from ..deps import get_db, get_current_workspace
+from ..deps import get_db, get_authorized_workspace
 from ..settings import settings
 
 router = APIRouter()
@@ -123,7 +123,7 @@ async def upload_agent(
     assistant_id: Optional[str] = Form(None),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     if not _allowed_upload(file.filename or ""):
         raise HTTPException(
@@ -214,7 +214,7 @@ async def upload_agent(
 async def list_agents(
     workspace_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     if workspace.id != workspace_id:
         raise HTTPException(404, "Workspace not found")
@@ -236,7 +236,7 @@ async def get_agent(
     workspace_id: uuid.UUID,
     agent_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     if workspace.id != workspace_id:
         raise HTTPException(404, "Workspace not found")

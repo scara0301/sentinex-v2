@@ -23,6 +23,7 @@ from sentinex_core.events.schema import (
     ToolCallPayload,
     ToolResultPayload,
 )
+from sentinex_core.findings import honeypots
 from sentinex_proxy.chain_tracker import ChainTracker
 from sentinex_proxy.injection import InjectionEngine
 from sentinex_proxy.interceptors.http import classify_request, classify_response
@@ -36,6 +37,9 @@ class SentinexAddon:
         self.redis: aioredis.Redis = None
         self.seq = 0  # local fallback when Redis is unreachable
         self.chain_tracker = ChainTracker()
+        # Known planted values must be tracked from the first request — the
+        # regex harvester only catches values that *look* like secrets.
+        self.chain_tracker.seed_sensitive(honeypots.ALL)
         self.injector = InjectionEngine()
         self._pending: dict[str, tuple[float, EventEnvelope]] = {}
         # Breakpoint state (Sprint 5): while paused, tool responses are
