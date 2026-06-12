@@ -23,7 +23,7 @@ from sentinex_core.db.repos import (
     RemediationRepo,
 )
 from sentinex_core.events.schema import BreakpointPayload, EventEnvelope
-from ..deps import get_db, get_current_workspace
+from ..deps import get_db, get_authorized_workspace
 from ..settings import settings
 
 router = APIRouter()
@@ -41,7 +41,7 @@ async def start_scan(
     workspace_id: uuid.UUID,
     body: ScanCreate,
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     agent_repo = AgentRepo(db)
     agent = await agent_repo.get_by_id(body.agent_id)
@@ -84,7 +84,7 @@ async def get_scan(
     workspace_id: uuid.UUID,
     scan_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     repo = ScanRepo(db)
     scan = await repo.get_by_id(scan_id)
@@ -105,7 +105,7 @@ async def get_scan(
 async def list_scans(
     workspace_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     repo = ScanRepo(db)
     scans = await repo.list_by_workspace(workspace_id, limit=50)
@@ -127,7 +127,7 @@ async def list_scan_events(
     from_seq: int = Query(0, ge=0),
     limit: int = Query(500, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     """Paginated event replay — used by the dashboard for step-through replay."""
     scan_repo = ScanRepo(db)
@@ -159,7 +159,7 @@ async def list_scan_findings(
     scan_id: uuid.UUID,
     severity: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     """List findings for a completed scan, optionally filtered by severity."""
     scan_repo = ScanRepo(db)
@@ -206,7 +206,7 @@ async def get_scan_report(
     workspace_id: uuid.UUID,
     scan_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     """
     Download the compliance report for a finished scan.
@@ -261,7 +261,7 @@ async def control_scan(
     scan_id: uuid.UUID,
     body: ControlRequest,
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     """
     Breakpoint control for a live scan (Sprint 5).
@@ -333,7 +333,7 @@ async def apply_scan_fix(
     scan_id: uuid.UUID,
     body: FixRequest,
     db: AsyncSession = Depends(get_db),
-    workspace=Depends(get_current_workspace),
+    workspace=Depends(get_authorized_workspace),
 ):
     """
     Apply a finding's auto-generated patch to a copy of the agent bundle
@@ -359,7 +359,10 @@ async def apply_scan_fix(
         raise HTTPException(409, "Remediation already applied")
 
     await request.app.state.arq_pool.enqueue_job(
-        "apply_fix", str(scan_id), str(remediation.id)
+        "apply_fix",
+        str(scan_id),
+        str(remediation.id),
+        _job_id=f"apply_fix:{remediation.id}",
     )
     return {"status": "queued", "remediation_id": remediation.id}
 
