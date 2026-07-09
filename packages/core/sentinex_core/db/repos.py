@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,11 +41,6 @@ class WorkspaceRepo:
             select(Workspace).where(Workspace.api_key_hash == api_key_hash)
         )
         return result.scalar_one_or_none()
-
-    async def update_plan(self, workspace_id: uuid.UUID, plan: str) -> None:
-        await self._session.execute(
-            update(Workspace).where(Workspace.id == workspace_id).values(plan=plan)
-        )
 
 
 class AgentRepo:
@@ -165,23 +160,12 @@ class ScanRepo:
         )
         return result.scalars().all()
 
-    async def count_created_since(
-        self, workspace_id: uuid.UUID, since: datetime
-    ) -> int:
-        result = await self._session.execute(
-            select(func.count())
-            .select_from(Scan)
-            .where(Scan.workspace_id == workspace_id, Scan.created_at >= since)
-        )
-        return int(result.scalar_one())
-
     async def fail_stale(self, active_statuses: tuple[str, ...]) -> int:
         """Mark scans stuck in a mid-flight status as FAILED.
 
         Called at worker startup: any scan in an actively-running status has
         no live orchestrator (the worker that owned it died), so it would
-        otherwise consume its workspace's concurrency quota forever.
-        Returns the number of scans updated.
+        otherwise appear to run forever. Returns the number of scans updated.
         """
         now = datetime.now(timezone.utc)
         result = await self._session.execute(
@@ -190,19 +174,6 @@ class ScanRepo:
             .values(status="FAILED", finished_at=now)
         )
         return int(result.rowcount or 0)
-
-    async def count_active(
-        self, workspace_id: uuid.UUID, active_statuses: tuple[str, ...]
-    ) -> int:
-        result = await self._session.execute(
-            select(func.count())
-            .select_from(Scan)
-            .where(
-                Scan.workspace_id == workspace_id,
-                Scan.status.in_(active_statuses),
-            )
-        )
-        return int(result.scalar_one())
 
 
 class EventRepo:

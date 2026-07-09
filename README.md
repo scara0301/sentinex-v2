@@ -180,24 +180,6 @@ table with the badge and findings, exposes `scan-id` / `risk-score` /
 
 ---
 
-## Plans & Billing (Sprint 5)
-
-Workspaces carry a plan (`free` · `pro` · `enterprise`) that meters scans
-per month, concurrent scans, agents, and custom-scenario access. Quota
-violations return `402` (quota) or `429` (concurrency). Check usage with
-`GET /workspace/{id}/usage`; `POST /workspace/{id}/plan` is the
-integration point a payment provider's webhook handler calls to switch
-tiers.
-
-| | free | pro | enterprise |
-|---|---|---|---|
-| Scans / month | 10 | 200 | 10,000 |
-| Concurrent scans | 1 | 5 | 50 |
-| Agents | 3 | 25 | 1,000 |
-| Custom scenarios | — | ✅ | ✅ |
-
----
-
 ## Getting Started
 
 ### Prerequisites
@@ -334,8 +316,6 @@ Each scan runs in a fully isolated Docker environment:
 | `POST` | `/workspace/{id}/scan/{sid}/fix` | `X-Api-Key` | ✅ Sprint 4 |
 | `GET` | `/badge/{scan_id}.svg` | — | ✅ Sprint 4 |
 | `POST` | `/workspace/{id}/scan/{sid}/control` | `X-Api-Key` | ✅ Sprint 5 |
-| `GET` | `/workspace/{id}/usage` | `X-Api-Key` | ✅ Sprint 5 |
-| `POST` | `/workspace/{id}/plan` | `X-Api-Key` | ✅ Sprint 5 |
 
 ---
 
@@ -347,7 +327,7 @@ Each scan runs in a fully isolated Docker environment:
 | **2 — Live Observer** | 4–5 | WebSocket fanout · Redis pub/sub · Next.js dashboard · RiskGauge · EventStream | ✅ Done |
 | **3 — Attack Scenarios** | 6–7 | YAML DSL · Scenario runner · 3 built-in scenarios · Response injection | ✅ Done |
 | **4 — Reporting** | 8–9 | Compliance PDF · Remediation patches · Embeddable SVG badges | ✅ Done |
-| **5 — Multi-agent & CI** | 10+ | CrewAI/AutoGen loaders · Breakpoint/replay · GitHub Action · SaaS billing | ✅ Done |
+| **5 — Multi-agent & CI** | 10+ | CrewAI/AutoGen loaders · Breakpoint/replay · GitHub Action | ✅ Done |
 
 ---
 

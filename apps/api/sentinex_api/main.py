@@ -10,7 +10,7 @@ from sentinex_core.db.base import get_session, init_engine
 from sentinex_core.db.repos import ScenarioRepo
 from sentinex_core.scenarios import iter_builtin_scenarios
 from .settings import settings
-from .routes import workspaces, agents, scans, scenarios, badges, billing
+from .routes import workspaces, agents, scans, scenarios, badges
 from .routes import scans_ws
 from .ws.manager import ConnectionManager
 from .ws.fanout import RedisFanout
@@ -94,7 +94,6 @@ app.include_router(scans.router, prefix="/workspace/{workspace_id}/scan", tags=[
 app.include_router(scenarios.router, prefix="/scenarios", tags=["scenarios"])
 app.include_router(scans_ws.router, tags=["scans-ws"])
 app.include_router(badges.router, tags=["badges"])
-app.include_router(billing.router, prefix="/workspace/{workspace_id}", tags=["billing"])
 
 
 @app.get("/health")

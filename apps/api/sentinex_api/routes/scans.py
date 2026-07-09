@@ -9,11 +9,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
-from sentinex_core.billing import (
-    ACTIVE_SCAN_STATUSES,
-    current_period_start,
-    get_plan,
-)
 from sentinex_core.db.models import Event as EventModel
 from sentinex_core.db.repos import (
     ScanRepo,
@@ -49,23 +44,6 @@ async def start_scan(
         raise HTTPException(404, "Agent not found")
 
     scan_repo = ScanRepo(db)
-
-    # Plan quota enforcement (Sprint 5)
-    plan = get_plan(workspace.plan)
-    used = await scan_repo.count_created_since(workspace_id, current_period_start())
-    if used >= plan.scans_per_month:
-        raise HTTPException(
-            402,
-            f"Monthly scan quota reached ({used}/{plan.scans_per_month} on the "
-            f"'{plan.name}' plan). Upgrade via POST /workspace/{{id}}/plan.",
-        )
-    active = await scan_repo.count_active(workspace_id, ACTIVE_SCAN_STATUSES)
-    if active >= plan.max_concurrent_scans:
-        raise HTTPException(
-            429,
-            f"Concurrent scan limit reached ({active}/{plan.max_concurrent_scans} "
-            f"on the '{plan.name}' plan). Wait for a running scan to finish.",
-        )
     scan = await scan_repo.create(
         workspace_id=workspace_id,
         agent_id=body.agent_id,

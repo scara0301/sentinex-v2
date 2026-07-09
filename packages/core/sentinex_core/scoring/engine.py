@@ -7,9 +7,17 @@ dashboard.
 
 Formula
 -------
-1. Each finding contributes: ``severity_weight × category_multiplier``
-2. Base score = ``total_weight / finding_count``
-3. Final score = ``min(100, base × SCALING_FACTOR)``
+1. Each finding contributes a hazard ``p = severity_weight ×
+   category_multiplier / MAX_SINGLE_WEIGHT`` in ``[0, 1]``.
+2. Hazards combine with a "noisy-OR": ``risk = 1 − ∏(1 − p_i)``.
+3. Final score = ``100 × risk``.
+
+Because every ``(1 − p_i)`` factor is in ``[0, 1]``, the product can only
+shrink as findings are added, so the score is **monotonically
+non-decreasing**: discovering another vulnerability never lowers the
+reported risk (and the per-finding ``delta`` is never negative). An
+earlier revision averaged the weights, which let a handful of low-severity
+findings *drag down* a score already driven high by a critical one.
 """
 
 from __future__ import annotations
@@ -33,7 +41,12 @@ CATEGORY_MULTIPLIERS: dict[str, float] = {
     "business_logic": 1.3,
 }
 
-SCALING_FACTOR: float = 1.5
+# Largest weight any single finding can contribute (critical severity ×
+# the highest category multiplier). Used to normalize a finding's weight
+# into a [0, 1] hazard, so one maximal finding alone pins the score at 100.
+MAX_SINGLE_WEIGHT: float = max(SEVERITY_WEIGHTS.values()) * max(
+    CATEGORY_MULTIPLIERS.values()
+)
 
 
 @dataclass
@@ -59,18 +72,21 @@ class RiskScoreEngine:
 
     def __init__(self) -> None:
         self._findings: list[FindingEntry] = []
-        self._total_weight: float = 0.0
+        # Running product of the (1 - hazard) survival factors. Starts at 1.0
+        # (no risk) and only ever shrinks as findings accumulate.
+        self._survival: float = 1.0
         self._current_score: float = 0.0
 
     def add_finding(
         self, severity: str, category: str, rule_id: str
     ) -> tuple[float, float]:
-        """Add a finding and return ``(new_score, delta)``."""
+        """Add a finding and return ``(new_score, delta)``. ``delta >= 0``."""
         entry = FindingEntry(
             severity=severity, category=category, rule_id=rule_id
         )
         self._findings.append(entry)
-        self._total_weight += entry.weight
+        hazard = min(1.0, entry.weight / MAX_SINGLE_WEIGHT) if MAX_SINGLE_WEIGHT else 0.0
+        self._survival *= 1.0 - hazard
 
         old_score = self._current_score
         self._current_score = self._compute()
@@ -94,8 +110,7 @@ class RiskScoreEngine:
     def _compute(self) -> float:
         if not self._findings:
             return 0.0
-        mean_weight = self._total_weight / len(self._findings)
-        return min(100.0, mean_weight * SCALING_FACTOR)
+        return min(100.0, 100.0 * (1.0 - self._survival))
 
     @staticmethod
     def compute_from_findings(

@@ -122,17 +122,18 @@ tar czf uploads-$(date +%F).tar.gz -C /opt/sentinex/data uploads
 ```
 
 **Capacity** — the worker runs up to 5 concurrent scans
-(`max_jobs` in `apps/worker/sentinex_worker/main.py`); plan limits
-(free/pro/enterprise) cap per-workspace usage. Scale vertically first;
+(`max_jobs` in `apps/worker/sentinex_worker/main.py`). Scale vertically first;
 multiple workers on separate Docker hosts also work since jobs are
 distributed via Redis (each host needs the scan-time images and a copy
 of the uploads volume — use shared storage for `SENTINEX_DATA_DIR`).
 
 ## Security notes for a public deployment
 
-- **Workspace creation is open** (`POST /workspace` is unauthenticated by
-  design — that's the SaaS signup). Abuse is bounded by free-plan quotas:
-  10 scans/month, 1 concurrent scan, 3 agents, no custom scenarios.
+- **Workspace creation is open** (`POST /workspace` is unauthenticated) and
+  there are no per-workspace quotas — the only hard cap is the worker's
+  `max_jobs`. For a public deployment, put the API behind an auth proxy or
+  restrict `POST /workspace` at the reverse proxy (e.g. a Caddy matcher),
+  otherwise anyone who can reach the API can create workspaces and run scans.
 - **Uploaded agents are untrusted code.** They execute only inside the
   hardened sandbox (all capabilities dropped, read-only rootfs,
   `no-new-privileges`, memory/CPU/PID limits, internal-only network with
