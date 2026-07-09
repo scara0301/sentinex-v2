@@ -31,6 +31,7 @@ _GRADE_COLORS: dict[str, str] = {
     "D": "#fe7d37",
     "F": "#e05d44",
     "?": "#9f9f9f",
+    "PENDING": "#dfb317",
 }
 
 

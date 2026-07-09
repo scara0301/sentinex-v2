@@ -20,4 +20,6 @@ USER mocks
 ENV MOCK_PROVIDER=stripe
 
 EXPOSE 4010
-CMD ["sh", "-c", "uvicorn sentinex_mocks.${MOCK_PROVIDER}:app --host 0.0.0.0 --port 4010"]
+# --no-server-header suppresses uvicorn's default "Server: uvicorn" so the
+# RealismMiddleware-set header isn't fighting a duplicate from the ASGI layer.
+CMD ["sh", "-c", "uvicorn sentinex_mocks.${MOCK_PROVIDER}:app --host 0.0.0.0 --port 4010 --no-server-header"]

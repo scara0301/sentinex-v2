@@ -698,6 +698,7 @@ class ScanOrchestrator:
                     title=draft.title,
                     evidence=draft.evidence,
                     cwe=draft.cwe or None,
+                    confidence=draft.confidence,
                 )
                 playbook_md, diff = build_remediation(draft.rule_id, draft.category)
                 remediation = await rem_repo.create(
@@ -806,6 +807,7 @@ class ScanOrchestrator:
                         rule_id=f.rule_id,
                         severity=f.severity,
                         title=f.title,
+                        confidence=f.confidence,
                     ),
                 )
                 if self.redis is not None:
@@ -825,6 +827,7 @@ class ScanOrchestrator:
                     severity=f.severity,
                     category=f.category,
                     rule_id=f.rule_id,
+                    confidence=f.confidence,
                 )
                 risk_seq = await self.redis.incr(f"scan:{scan_id}:seq") if self.redis is not None else 0
                 risk_ts = datetime.now(timezone.utc)

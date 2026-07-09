@@ -8,7 +8,8 @@ dashboard.
 Formula
 -------
 1. Each finding contributes a hazard ``p = severity_weight ×
-   category_multiplier / MAX_SINGLE_WEIGHT`` in ``[0, 1]``.
+   category_multiplier × confidence_multiplier / MAX_SINGLE_WEIGHT`` in
+   ``[0, 1]``.
 2. Hazards combine with a "noisy-OR": ``risk = 1 − ∏(1 − p_i)``.
 3. Final score = ``100 × risk``.
 
@@ -41,6 +42,14 @@ CATEGORY_MULTIPLIERS: dict[str, float] = {
     "business_logic": 1.3,
 }
 
+# Dampens a finding's contribution when the detection's only evidence is
+# textual (e.g. a bare marker-string match) rather than behavioral (e.g. an
+# observed network call). Still in (0, 1], so monotonicity is preserved.
+CONFIDENCE_MULTIPLIERS: dict[str, float] = {
+    "strong": 1.0,
+    "weak": 0.4,
+}
+
 # Largest weight any single finding can contribute (critical severity ×
 # the highest category multiplier). Used to normalize a finding's weight
 # into a [0, 1] hazard, so one maximal finding alone pins the score at 100.
@@ -54,12 +63,14 @@ class FindingEntry:
     severity: str
     category: str
     rule_id: str
+    confidence: str = "strong"
     weight: float = 0.0
 
     def __post_init__(self):
         base = SEVERITY_WEIGHTS.get(self.severity, 0.0)
         mult = CATEGORY_MULTIPLIERS.get(self.category, 1.0)
-        self.weight = base * mult
+        conf = CONFIDENCE_MULTIPLIERS.get(self.confidence, 1.0)
+        self.weight = base * mult * conf
 
 
 class RiskScoreEngine:
@@ -78,11 +89,11 @@ class RiskScoreEngine:
         self._current_score: float = 0.0
 
     def add_finding(
-        self, severity: str, category: str, rule_id: str
+        self, severity: str, category: str, rule_id: str, confidence: str = "strong"
     ) -> tuple[float, float]:
         """Add a finding and return ``(new_score, delta)``. ``delta >= 0``."""
         entry = FindingEntry(
-            severity=severity, category=category, rule_id=rule_id
+            severity=severity, category=category, rule_id=rule_id, confidence=confidence
         )
         self._findings.append(entry)
         hazard = min(1.0, entry.weight / MAX_SINGLE_WEIGHT) if MAX_SINGLE_WEIGHT else 0.0
@@ -114,13 +125,13 @@ class RiskScoreEngine:
 
     @staticmethod
     def compute_from_findings(
-        findings: list[tuple[str, str, str]],
+        findings: list[tuple],
     ) -> float:
         """
-        One-shot computation from (severity, category, rule_id) tuples.
-        Used by the orchestrator at the SCORING phase.
+        One-shot computation from (severity, category, rule_id[, confidence])
+        tuples. Used by the orchestrator at the SCORING phase.
         """
         engine = RiskScoreEngine()
-        for sev, cat, rule_id in findings:
-            engine.add_finding(sev, cat, rule_id)
+        for sev, cat, rule_id, *rest in findings:
+            engine.add_finding(sev, cat, rule_id, rest[0] if rest else "strong")
         return engine.current_score()

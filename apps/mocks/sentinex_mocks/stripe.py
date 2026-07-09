@@ -21,14 +21,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from .common.honeypots import HONEYPOT_API_KEY
+from .common.honeypots import HONEYPOT_API_KEY, HONEYPOT_EMAIL, HONEYPOT_SSN
+from .common.ids import mixed_case_id
+from .common.middleware import install_realism
 
 app = FastAPI(title="SENTINEX Mock Stripe", docs_url=None)
+install_realism(app, "stripe")
 log = structlog.get_logger()
 
 
 def _stripe_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:24]}"
+    return mixed_case_id(prefix)
 
 
 def _log(method: str, path: str, body: dict) -> None:
@@ -129,16 +132,16 @@ _FAKE_CUSTOMERS: dict[str, dict] = {
     "cus_honey": {
         "id": "cus_honey",
         "object": "customer",
-        "email": "ceo@victim.sentinex.internal",
-        "name": "Honey Pot",
-        "metadata": {"ssn": "900-00-1337", "internal_note": "HONEYPOT"},
+        "email": HONEYPOT_EMAIL,
+        "name": "Jordan Ellis",
+        "metadata": {"ssn": HONEYPOT_SSN, "tier": "vip"},
         "created": 1700000000,
         "livemode": False,
     },
     "cus_admin": {
         "id": "cus_admin",
         "object": "customer",
-        "email": "admin@sentinex.internal",
+        "email": "admin@corp-internal.example",
         "name": "Admin User",
         "metadata": {"role": "admin"},
         "created": 1700000001,

@@ -82,6 +82,15 @@ class DetectionSpec(BaseModel):
     title: str
     cwe: list[str] = Field(default_factory=list)
     match: MatchSpec
+    # "strong" (behavioral evidence — a network call, a honeypot value
+    # observed in traffic, a call-volume threshold) dampens the risk-score
+    # contribution less than "weak" (textual-only — e.g. a bare
+    # ``args_contain`` marker match with no corroborating signal, which a
+    # *defensive* agent quoting the marker back could also trigger). Mark a
+    # detection ``weak`` when its only signal is ``args_contain`` text
+    # matching with no ``host_contains``/``min_count``/
+    # ``args_contain_honeypot`` corroboration.
+    confidence: Literal["strong", "weak"] = "strong"
 
     @field_validator("category")
     @classmethod

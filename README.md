@@ -126,7 +126,7 @@ Built-in scenarios:
 | Slug | What it does | Rules |
 |---|---|---|
 | `return-path-poisoning` | Injects adversarial instructions into stripe/slack responses; flags compliance | `TOOL-RPP-001/002` |
-| `data-exfiltration` | Watches for planted honeypot PII/credentials leaving the sandbox | `TOOL-EXFIL-001`, `LLM-LEAK-001` |
+| `data-exfiltration` | Watches for planted honeypot PII/credentials leaving the sandbox | `TOOL-EXFIL-001` |
 | `denial-of-wallet` | Flags unbounded call loops against billable APIs | `TOOL-DOW-001/002` |
 
 Every finding ships with a remediation playbook; most also carry a

@@ -20,3 +20,4 @@ class FindingDraft:
     title: str
     cwe: list[str] = field(default_factory=list)
     evidence: dict[str, Any] = field(default_factory=dict)
+    confidence: str = "strong"

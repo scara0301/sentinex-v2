@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -227,6 +227,7 @@ class FindingRepo:
         evidence: Optional[dict] = None,
         cwe: Optional[list[str]] = None,
         remediation_id: Optional[uuid.UUID] = None,
+        confidence: str = "strong",
         id: Optional[uuid.UUID] = None,
     ) -> Finding:
         finding = Finding(
@@ -239,6 +240,7 @@ class FindingRepo:
             evidence=evidence,
             cwe=cwe,
             remediation_id=remediation_id,
+            confidence=confidence,
             created_at=datetime.now(timezone.utc),
         )
         self._session.add(finding)
@@ -265,15 +267,50 @@ class FindingRepo:
         scan_id: uuid.UUID,
         *,
         severity: Optional[str] = None,
+        status: Optional[str] = None,
         limit: int = 200,
         offset: int = 0,
     ) -> Sequence[Finding]:
         stmt = select(Finding).where(Finding.scan_id == scan_id)
         if severity is not None:
             stmt = stmt.where(Finding.severity == severity)
+        if status is not None:
+            stmt = stmt.where(Finding.status == status)
         stmt = stmt.order_by(Finding.created_at).limit(limit).offset(offset)
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+    async def update_review(
+        self,
+        finding_id: uuid.UUID,
+        *,
+        status: str,
+        reviewer: Optional[str],
+        note: Optional[str],
+    ) -> None:
+        await self._session.execute(
+            update(Finding)
+            .where(Finding.id == finding_id)
+            .values(
+                status=status,
+                reviewed_at=datetime.now(timezone.utc),
+                reviewed_by=reviewer,
+                review_note=note,
+            )
+        )
+
+    async def count_unreviewed_blocking(self, scan_id: uuid.UUID) -> int:
+        """Count open critical/high findings — the badge/report issuance gate."""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Finding)
+            .where(
+                Finding.scan_id == scan_id,
+                Finding.status == "open",
+                Finding.severity.in_(("critical", "high")),
+            )
+        )
+        return int(result.scalar_one())
 
 
 class ScenarioRepo:

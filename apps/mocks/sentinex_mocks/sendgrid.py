@@ -12,7 +12,10 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
 
+from .common.middleware import install_realism
+
 app = FastAPI(title="SENTINEX Mock SendGrid", docs_url=None)
+install_realism(app, "sendgrid")
 log = structlog.get_logger()
 
 

@@ -185,6 +185,16 @@ class Finding(Base):
         ForeignKey("remediations.id", ondelete="SET NULL", deferrable=True, initially="DEFERRED"),
         nullable=True,
     )
+    # "strong" (behavioral evidence, e.g. a call to the attacker host) or
+    # "weak" (textual-only match, e.g. a marker string that a defensive
+    # agent could echo without complying) — set by the firing detection rule.
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False, default="strong")
+    # "open" | "confirmed" | "dismissed" — set by a human via the review
+    # endpoint. Gates badge/report issuance independently of confidence.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    review_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
@@ -235,3 +245,4 @@ Index("ix_agents_workspace", Agent.workspace_id)
 Index("ix_scans_workspace_created", Scan.workspace_id, Scan.created_at)
 Index("ix_events_scan_ts", Event.scan_id, Event.ts)
 Index("ix_findings_scan_severity", Finding.scan_id, Finding.severity)
+Index("ix_findings_scan_status_severity", Finding.scan_id, Finding.status, Finding.severity)

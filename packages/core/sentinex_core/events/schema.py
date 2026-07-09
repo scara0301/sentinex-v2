@@ -42,6 +42,7 @@ class FindingPayload(BaseModel):
     severity: Literal["critical", "high", "medium", "low", "info"]
     title: str
     evidence_seqs: list[int] = Field(default_factory=list)
+    confidence: Literal["strong", "weak"] = "strong"
 
 
 class StatePayload(BaseModel):
