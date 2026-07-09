@@ -198,8 +198,17 @@ class Finding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     scan: Mapped["Scan"] = relationship(back_populates="findings")
+    # Not a true bidirectional pair with Remediation.finding below — each
+    # side has its own physical FK column pointing at the other table
+    # (remediation_id here, finding_id there), so there's no single shared
+    # FK for SQLAlchemy to infer a consistent one-to-many/many-to-one
+    # direction from. back_populates on both sides made SQLAlchemy treat
+    # both as MANYTOONE and refuse to configure. Neither side is read via
+    # the ORM relationship anywhere in the app (everything goes through
+    # the *_id columns and repo methods), so declaring them independently
+    # — each scoped to its own foreign_keys — is both correct and safe.
     remediation: Mapped[Optional["Remediation"]] = relationship(
-        back_populates="finding", foreign_keys=[remediation_id]
+        foreign_keys=[remediation_id]
     )
 
 
@@ -221,9 +230,9 @@ class Remediation(Base):
         nullable=True,
     )
 
-    finding: Mapped["Finding"] = relationship(
-        back_populates="remediation", foreign_keys=[finding_id]
-    )
+    # See the comment on Finding.remediation above — declared independently
+    # rather than as a back_populates pair.
+    finding: Mapped["Finding"] = relationship(foreign_keys=[finding_id])
     rescan: Mapped[Optional["Scan"]] = relationship(foreign_keys=[rescan_id])
 
 
