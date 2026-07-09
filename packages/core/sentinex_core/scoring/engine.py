@@ -7,9 +7,18 @@ dashboard.
 
 Formula
 -------
-1. Each finding contributes: ``severity_weight × category_multiplier``
-2. Base score = ``total_weight / finding_count``
-3. Final score = ``min(100, base × SCALING_FACTOR)``
+1. Each finding contributes a hazard ``p = severity_weight ×
+   category_multiplier × confidence_multiplier / MAX_SINGLE_WEIGHT`` in
+   ``[0, 1]``.
+2. Hazards combine with a "noisy-OR": ``risk = 1 − ∏(1 − p_i)``.
+3. Final score = ``100 × risk``.
+
+Because every ``(1 − p_i)`` factor is in ``[0, 1]``, the product can only
+shrink as findings are added, so the score is **monotonically
+non-decreasing**: discovering another vulnerability never lowers the
+reported risk (and the per-finding ``delta`` is never negative). An
+earlier revision averaged the weights, which let a handful of low-severity
+findings *drag down* a score already driven high by a critical one.
 """
 
 from __future__ import annotations
@@ -33,7 +42,20 @@ CATEGORY_MULTIPLIERS: dict[str, float] = {
     "business_logic": 1.3,
 }
 
-SCALING_FACTOR: float = 1.5
+# Dampens a finding's contribution when the detection's only evidence is
+# textual (e.g. a bare marker-string match) rather than behavioral (e.g. an
+# observed network call). Still in (0, 1], so monotonicity is preserved.
+CONFIDENCE_MULTIPLIERS: dict[str, float] = {
+    "strong": 1.0,
+    "weak": 0.4,
+}
+
+# Largest weight any single finding can contribute (critical severity ×
+# the highest category multiplier). Used to normalize a finding's weight
+# into a [0, 1] hazard, so one maximal finding alone pins the score at 100.
+MAX_SINGLE_WEIGHT: float = max(SEVERITY_WEIGHTS.values()) * max(
+    CATEGORY_MULTIPLIERS.values()
+)
 
 
 @dataclass
@@ -41,12 +63,14 @@ class FindingEntry:
     severity: str
     category: str
     rule_id: str
+    confidence: str = "strong"
     weight: float = 0.0
 
     def __post_init__(self):
         base = SEVERITY_WEIGHTS.get(self.severity, 0.0)
         mult = CATEGORY_MULTIPLIERS.get(self.category, 1.0)
-        self.weight = base * mult
+        conf = CONFIDENCE_MULTIPLIERS.get(self.confidence, 1.0)
+        self.weight = base * mult * conf
 
 
 class RiskScoreEngine:
@@ -59,18 +83,21 @@ class RiskScoreEngine:
 
     def __init__(self) -> None:
         self._findings: list[FindingEntry] = []
-        self._total_weight: float = 0.0
+        # Running product of the (1 - hazard) survival factors. Starts at 1.0
+        # (no risk) and only ever shrinks as findings accumulate.
+        self._survival: float = 1.0
         self._current_score: float = 0.0
 
     def add_finding(
-        self, severity: str, category: str, rule_id: str
+        self, severity: str, category: str, rule_id: str, confidence: str = "strong"
     ) -> tuple[float, float]:
-        """Add a finding and return ``(new_score, delta)``."""
+        """Add a finding and return ``(new_score, delta)``. ``delta >= 0``."""
         entry = FindingEntry(
-            severity=severity, category=category, rule_id=rule_id
+            severity=severity, category=category, rule_id=rule_id, confidence=confidence
         )
         self._findings.append(entry)
-        self._total_weight += entry.weight
+        hazard = min(1.0, entry.weight / MAX_SINGLE_WEIGHT) if MAX_SINGLE_WEIGHT else 0.0
+        self._survival *= 1.0 - hazard
 
         old_score = self._current_score
         self._current_score = self._compute()
@@ -94,18 +121,17 @@ class RiskScoreEngine:
     def _compute(self) -> float:
         if not self._findings:
             return 0.0
-        mean_weight = self._total_weight / len(self._findings)
-        return min(100.0, mean_weight * SCALING_FACTOR)
+        return min(100.0, 100.0 * (1.0 - self._survival))
 
     @staticmethod
     def compute_from_findings(
-        findings: list[tuple[str, str, str]],
+        findings: list[tuple],
     ) -> float:
         """
-        One-shot computation from (severity, category, rule_id) tuples.
-        Used by the orchestrator at the SCORING phase.
+        One-shot computation from (severity, category, rule_id[, confidence])
+        tuples. Used by the orchestrator at the SCORING phase.
         """
         engine = RiskScoreEngine()
-        for sev, cat, rule_id in findings:
-            engine.add_finding(sev, cat, rule_id)
+        for sev, cat, rule_id, *rest in findings:
+            engine.add_finding(sev, cat, rule_id, rest[0] if rest else "strong")
         return engine.current_score()

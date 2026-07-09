@@ -42,11 +42,6 @@ class WorkspaceRepo:
         )
         return result.scalar_one_or_none()
 
-    async def update_plan(self, workspace_id: uuid.UUID, plan: str) -> None:
-        await self._session.execute(
-            update(Workspace).where(Workspace.id == workspace_id).values(plan=plan)
-        )
-
 
 class AgentRepo:
     def __init__(self, session: AsyncSession) -> None:
@@ -165,23 +160,12 @@ class ScanRepo:
         )
         return result.scalars().all()
 
-    async def count_created_since(
-        self, workspace_id: uuid.UUID, since: datetime
-    ) -> int:
-        result = await self._session.execute(
-            select(func.count())
-            .select_from(Scan)
-            .where(Scan.workspace_id == workspace_id, Scan.created_at >= since)
-        )
-        return int(result.scalar_one())
-
     async def fail_stale(self, active_statuses: tuple[str, ...]) -> int:
         """Mark scans stuck in a mid-flight status as FAILED.
 
         Called at worker startup: any scan in an actively-running status has
         no live orchestrator (the worker that owned it died), so it would
-        otherwise consume its workspace's concurrency quota forever.
-        Returns the number of scans updated.
+        otherwise appear to run forever. Returns the number of scans updated.
         """
         now = datetime.now(timezone.utc)
         result = await self._session.execute(
@@ -190,19 +174,6 @@ class ScanRepo:
             .values(status="FAILED", finished_at=now)
         )
         return int(result.rowcount or 0)
-
-    async def count_active(
-        self, workspace_id: uuid.UUID, active_statuses: tuple[str, ...]
-    ) -> int:
-        result = await self._session.execute(
-            select(func.count())
-            .select_from(Scan)
-            .where(
-                Scan.workspace_id == workspace_id,
-                Scan.status.in_(active_statuses),
-            )
-        )
-        return int(result.scalar_one())
 
 
 class EventRepo:
@@ -256,6 +227,7 @@ class FindingRepo:
         evidence: Optional[dict] = None,
         cwe: Optional[list[str]] = None,
         remediation_id: Optional[uuid.UUID] = None,
+        confidence: str = "strong",
         id: Optional[uuid.UUID] = None,
     ) -> Finding:
         finding = Finding(
@@ -268,6 +240,7 @@ class FindingRepo:
             evidence=evidence,
             cwe=cwe,
             remediation_id=remediation_id,
+            confidence=confidence,
             created_at=datetime.now(timezone.utc),
         )
         self._session.add(finding)
@@ -294,15 +267,50 @@ class FindingRepo:
         scan_id: uuid.UUID,
         *,
         severity: Optional[str] = None,
+        status: Optional[str] = None,
         limit: int = 200,
         offset: int = 0,
     ) -> Sequence[Finding]:
         stmt = select(Finding).where(Finding.scan_id == scan_id)
         if severity is not None:
             stmt = stmt.where(Finding.severity == severity)
+        if status is not None:
+            stmt = stmt.where(Finding.status == status)
         stmt = stmt.order_by(Finding.created_at).limit(limit).offset(offset)
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+    async def update_review(
+        self,
+        finding_id: uuid.UUID,
+        *,
+        status: str,
+        reviewer: Optional[str],
+        note: Optional[str],
+    ) -> None:
+        await self._session.execute(
+            update(Finding)
+            .where(Finding.id == finding_id)
+            .values(
+                status=status,
+                reviewed_at=datetime.now(timezone.utc),
+                reviewed_by=reviewer,
+                review_note=note,
+            )
+        )
+
+    async def count_unreviewed_blocking(self, scan_id: uuid.UUID) -> int:
+        """Count open critical/high findings — the badge/report issuance gate."""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Finding)
+            .where(
+                Finding.scan_id == scan_id,
+                Finding.status == "open",
+                Finding.severity.in_(("critical", "high")),
+            )
+        )
+        return int(result.scalar_one())
 
 
 class ScenarioRepo:

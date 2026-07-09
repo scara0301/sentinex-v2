@@ -8,7 +8,6 @@ import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinex_core.billing import get_plan
 from sentinex_core.db.repos import AgentRepo
 from ..deps import get_db, get_authorized_workspace
 from ..settings import settings
@@ -129,16 +128,6 @@ async def upload_agent(
         raise HTTPException(
             400,
             f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
-        )
-
-    # Plan quota: distinct agent names count against max_agents (Sprint 5).
-    plan = get_plan(workspace.plan)
-    existing_names = {a.name for a in await AgentRepo(db).list_by_workspace(workspace_id)}
-    if name not in existing_names and len(existing_names) >= plan.max_agents:
-        raise HTTPException(
-            402,
-            f"Agent limit reached ({len(existing_names)}/{plan.max_agents} on the "
-            f"'{plan.name}' plan). Upgrade via POST /workspace/{{id}}/plan.",
         )
 
     bundle_root = Path(settings.upload_dir) / str(workspace_id) / name

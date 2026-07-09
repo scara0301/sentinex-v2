@@ -44,6 +44,5 @@ async def get_workspace(
     return {
         "id": workspace.id,
         "name": workspace.name,
-        "plan": workspace.plan,
         "created_at": workspace.created_at,
     }

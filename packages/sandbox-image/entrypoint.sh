@@ -1,12 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-# The agent bundle is mounted read-only at /work. Uploaded archives extract
-# to /work/src; a single uploaded .py file also lands there. The orchestrator
-# sets HTTPS_PROXY, OPENAI_BASE_URL, ANTHROPIC_BASE_URL, SCAN_ID, and (when the
-# proxy CA could be extracted) the CA-trust env vars.
-#
-# Resolve the entry script: explicit override, then conventional names, then a
-# lone .py file in src/ or the bundle root.
+# Resolves and execs the agent's entry script. Configuration arrives via
+# environment variables and a read-only mount at /work.
 
 resolve_entry() {
     if [ -n "${SENTINEX_ENTRYPOINT:-}" ] && [ -f "${SENTINEX_ENTRYPOINT}" ]; then

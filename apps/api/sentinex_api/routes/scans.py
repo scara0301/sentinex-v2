@@ -9,11 +9,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
-from sentinex_core.billing import (
-    ACTIVE_SCAN_STATUSES,
-    current_period_start,
-    get_plan,
-)
 from sentinex_core.db.models import Event as EventModel
 from sentinex_core.db.repos import (
     ScanRepo,
@@ -49,23 +44,6 @@ async def start_scan(
         raise HTTPException(404, "Agent not found")
 
     scan_repo = ScanRepo(db)
-
-    # Plan quota enforcement (Sprint 5)
-    plan = get_plan(workspace.plan)
-    used = await scan_repo.count_created_since(workspace_id, current_period_start())
-    if used >= plan.scans_per_month:
-        raise HTTPException(
-            402,
-            f"Monthly scan quota reached ({used}/{plan.scans_per_month} on the "
-            f"'{plan.name}' plan). Upgrade via POST /workspace/{{id}}/plan.",
-        )
-    active = await scan_repo.count_active(workspace_id, ACTIVE_SCAN_STATUSES)
-    if active >= plan.max_concurrent_scans:
-        raise HTTPException(
-            429,
-            f"Concurrent scan limit reached ({active}/{plan.max_concurrent_scans} "
-            f"on the '{plan.name}' plan). Wait for a running scan to finish.",
-        )
     scan = await scan_repo.create(
         workspace_id=workspace_id,
         agent_id=body.agent_id,
@@ -90,6 +68,12 @@ async def get_scan(
     scan = await repo.get_by_id(scan_id)
     if not scan or scan.workspace_id != workspace_id:
         raise HTTPException(404, "Scan not found")
+
+    pending_review = None
+    if scan.status == "DONE":
+        blocking = await FindingRepo(db).count_unreviewed_blocking(scan_id)
+        pending_review = blocking > 0
+
     return {
         "id": scan.id,
         "status": scan.status,
@@ -98,6 +82,7 @@ async def get_scan(
         "finished_at": scan.finished_at,
         "agent_id": scan.agent_id,
         "scenario_ids": scan.scenario_ids,
+        "pending_review": pending_review,
     }
 
 
@@ -158,17 +143,18 @@ async def list_scan_findings(
     workspace_id: uuid.UUID,
     scan_id: uuid.UUID,
     severity: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     workspace=Depends(get_authorized_workspace),
 ):
-    """List findings for a completed scan, optionally filtered by severity."""
+    """List findings for a completed scan, optionally filtered by severity/status."""
     scan_repo = ScanRepo(db)
     scan = await scan_repo.get_by_id(scan_id)
     if not scan or scan.workspace_id != workspace_id:
         raise HTTPException(404, "Scan not found")
 
     finding_repo = FindingRepo(db)
-    findings = await finding_repo.list_by_scan(scan_id, severity=severity)
+    findings = await finding_repo.list_by_scan(scan_id, severity=severity, status=status)
     remediations = await RemediationRepo(db).list_by_finding_ids(
         [f.id for f in findings]
     )
@@ -185,6 +171,11 @@ async def list_scan_findings(
                 "title": f.title,
                 "evidence": f.evidence,
                 "cwe": f.cwe,
+                "confidence": f.confidence,
+                "status": f.status,
+                "reviewed_at": f.reviewed_at,
+                "reviewed_by": f.reviewed_by,
+                "review_note": f.review_note,
                 "created_at": f.created_at,
                 "remediation": {
                     "id": r.id,
@@ -198,6 +189,56 @@ async def list_scan_findings(
             }
         )
     return out
+
+
+class FindingReviewRequest(BaseModel):
+    status: Literal["open", "confirmed", "dismissed"]
+    reviewer: Optional[str] = None
+    note: Optional[str] = None
+
+
+@router.post("/{scan_id}/findings/{finding_id}/review")
+async def review_finding(
+    workspace_id: uuid.UUID,
+    scan_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    body: FindingReviewRequest,
+    db: AsyncSession = Depends(get_db),
+    workspace=Depends(get_authorized_workspace),
+):
+    """Record a human review decision (confirm/dismiss/reopen) for a finding.
+
+    Gates badge/report issuance (via ``count_unreviewed_blocking``) and
+    whether ``/fix`` can be applied — a dismissed finding is presumed a
+    false positive and its remediation should not be auto-applied.
+    """
+    scan_repo = ScanRepo(db)
+    scan = await scan_repo.get_by_id(scan_id)
+    if not scan or scan.workspace_id != workspace_id:
+        raise HTTPException(404, "Scan not found")
+
+    finding_repo = FindingRepo(db)
+    finding = await finding_repo.get_by_id(finding_id)
+    if not finding or finding.scan_id != scan_id:
+        raise HTTPException(404, "Finding not found for this scan")
+
+    await finding_repo.update_review(
+        finding_id,
+        status=body.status,
+        reviewer=body.reviewer or workspace.name,
+        note=body.note,
+    )
+    await db.commit()
+
+    finding = await finding_repo.get_by_id(finding_id)
+    return {
+        "id": finding.id,
+        "status": finding.status,
+        "confidence": finding.confidence,
+        "reviewed_at": finding.reviewed_at,
+        "reviewed_by": finding.reviewed_by,
+        "review_note": finding.review_note,
+    }
 
 
 @router.get("/{scan_id}/report")
@@ -218,6 +259,17 @@ async def get_scan_report(
     scan = await scan_repo.get_by_id(scan_id)
     if not scan or scan.workspace_id != workspace_id:
         raise HTTPException(404, "Scan not found")
+
+    blocking = await FindingRepo(db).count_unreviewed_blocking(scan_id)
+    if blocking > 0:
+        raise HTTPException(
+            409,
+            {
+                "status": "pending_review",
+                "unreviewed_findings": blocking,
+                "detail": "Report withheld pending review of critical/high findings.",
+            },
+        )
 
     report_dir = Path(settings.report_dir)
     pdf_path = report_dir / f"{scan_id}.pdf"
@@ -347,6 +399,8 @@ async def apply_scan_fix(
     finding = await FindingRepo(db).get_by_id(body.finding_id)
     if not finding or finding.scan_id != scan_id:
         raise HTTPException(404, "Finding not found for this scan")
+    if finding.status == "dismissed":
+        raise HTTPException(409, "Finding was dismissed in review; cannot apply fix")
     if not finding.remediation_id:
         raise HTTPException(409, "Finding has no remediation")
 

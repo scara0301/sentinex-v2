@@ -26,6 +26,12 @@ def test_render_badge_svg():
     assert "sentinex" in svg
 
 
+def test_pending_grade_renders():
+    svg = render_badge_svg("PENDING", label="sentinex scan")
+    assert svg.startswith("<svg")
+    assert "PENDING" in svg
+
+
 def test_signature_roundtrip():
     signed_at = datetime(2026, 6, 10, tzinfo=timezone.utc)
     sig = sign_badge("secret", "scan-1", "A", signed_at)

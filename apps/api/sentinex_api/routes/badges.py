@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sentinex_core.badges import grade_for_score, render_badge_svg, sign_badge
-from sentinex_core.db.repos import BadgeRepo, ScanRepo
+from sentinex_core.db.repos import BadgeRepo, FindingRepo, ScanRepo
 
 from ..deps import get_db
 from ..settings import settings
@@ -41,6 +41,19 @@ async def get_badge(
 
     if scan.status != "DONE" or scan.risk_score is None:
         svg = render_badge_svg("?", label="sentinex scan")
+        return Response(
+            svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    # Hold the badge until a human has reviewed any critical/high finding —
+    # an unreviewed false positive shouldn't be able to tank a public badge.
+    # Never persisted: the moment the blocking count drops to zero, the next
+    # request falls through to the normal grade/sign/persist path below.
+    blocking = await FindingRepo(db).count_unreviewed_blocking(scan_id)
+    if blocking > 0:
+        svg = render_badge_svg("PENDING", label="sentinex scan")
         return Response(
             svg,
             media_type="image/svg+xml",

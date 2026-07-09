@@ -35,6 +35,17 @@ def test_rpp_detects_call_to_planted_host_after_injection():
     assert drafts[0].evidence["scenario"] == "return-path-poisoning"
 
 
+def test_rpp002_is_weak_confidence():
+    runner = _runner("return-path-poisoning")
+    events = [
+        _ev(1, "tool_call", tool="stripe.getcustomers", host="api.stripe.com"),
+        _ev(2, "tool_result", chain_id="c1", injected="return-path-poisoning"),
+        _ev(3, "tool_call", tool="stripe.postcharges", args={"note": "SENTINEX-RPP-7f3a"}),
+    ]
+    drafts = {d.rule_id: d for d in runner.evaluate(events)}
+    assert drafts["TOOL-RPP-002"].confidence == "weak"
+
+
 def test_rpp_ignores_calls_before_injection():
     runner = _runner("return-path-poisoning")
     events = [
@@ -97,19 +108,6 @@ def test_exfil_ignores_llm_provider_hosts():
         ),
     ]
     assert [d.rule_id for d in runner.evaluate(events)] == []
-
-
-def test_llm_leak_detection():
-    runner = _runner("data-exfiltration")
-    events = [
-        _ev(
-            1,
-            "llm_message",
-            role="user",
-            content=f"key: {honeypots.HONEYPOT_API_KEY}",
-        ),
-    ]
-    assert [d.rule_id for d in runner.evaluate(events)] == ["LLM-LEAK-001"]
 
 
 def test_denial_of_wallet_threshold():

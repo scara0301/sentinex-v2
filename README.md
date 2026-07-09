@@ -126,7 +126,7 @@ Built-in scenarios:
 | Slug | What it does | Rules |
 |---|---|---|
 | `return-path-poisoning` | Injects adversarial instructions into stripe/slack responses; flags compliance | `TOOL-RPP-001/002` |
-| `data-exfiltration` | Watches for planted honeypot PII/credentials leaving the sandbox | `TOOL-EXFIL-001`, `LLM-LEAK-001` |
+| `data-exfiltration` | Watches for planted honeypot PII/credentials leaving the sandbox | `TOOL-EXFIL-001` |
 | `denial-of-wallet` | Flags unbounded call loops against billable APIs | `TOOL-DOW-001/002` |
 
 Every finding ships with a remediation playbook; most also carry a
@@ -177,24 +177,6 @@ composite action (`action.yml`):
 The action uploads the bundle, waits for the scan, writes a job-summary
 table with the badge and findings, exposes `scan-id` / `risk-score` /
 `grade` / `badge-url` outputs, and fails the build when the gate trips.
-
----
-
-## Plans & Billing (Sprint 5)
-
-Workspaces carry a plan (`free` · `pro` · `enterprise`) that meters scans
-per month, concurrent scans, agents, and custom-scenario access. Quota
-violations return `402` (quota) or `429` (concurrency). Check usage with
-`GET /workspace/{id}/usage`; `POST /workspace/{id}/plan` is the
-integration point a payment provider's webhook handler calls to switch
-tiers.
-
-| | free | pro | enterprise |
-|---|---|---|---|
-| Scans / month | 10 | 200 | 10,000 |
-| Concurrent scans | 1 | 5 | 50 |
-| Agents | 3 | 25 | 1,000 |
-| Custom scenarios | — | ✅ | ✅ |
 
 ---
 
@@ -334,8 +316,6 @@ Each scan runs in a fully isolated Docker environment:
 | `POST` | `/workspace/{id}/scan/{sid}/fix` | `X-Api-Key` | ✅ Sprint 4 |
 | `GET` | `/badge/{scan_id}.svg` | — | ✅ Sprint 4 |
 | `POST` | `/workspace/{id}/scan/{sid}/control` | `X-Api-Key` | ✅ Sprint 5 |
-| `GET` | `/workspace/{id}/usage` | `X-Api-Key` | ✅ Sprint 5 |
-| `POST` | `/workspace/{id}/plan` | `X-Api-Key` | ✅ Sprint 5 |
 
 ---
 
@@ -347,7 +327,7 @@ Each scan runs in a fully isolated Docker environment:
 | **2 — Live Observer** | 4–5 | WebSocket fanout · Redis pub/sub · Next.js dashboard · RiskGauge · EventStream | ✅ Done |
 | **3 — Attack Scenarios** | 6–7 | YAML DSL · Scenario runner · 3 built-in scenarios · Response injection | ✅ Done |
 | **4 — Reporting** | 8–9 | Compliance PDF · Remediation patches · Embeddable SVG badges | ✅ Done |
-| **5 — Multi-agent & CI** | 10+ | CrewAI/AutoGen loaders · Breakpoint/replay · GitHub Action · SaaS billing | ✅ Done |
+| **5 — Multi-agent & CI** | 10+ | CrewAI/AutoGen loaders · Breakpoint/replay · GitHub Action | ✅ Done |
 
 ---
 

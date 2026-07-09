@@ -40,3 +40,36 @@ def test_one_shot_matches_streaming():
     for sev, cat, rule in findings:
         engine.add_finding(sev, cat, rule)
     assert RiskScoreEngine.compute_from_findings(findings) == engine.current_score()
+
+
+def test_weak_confidence_dampens_score():
+    strong = RiskScoreEngine()
+    strong.add_finding("high", "tool_layer", "X", "strong")
+    weak = RiskScoreEngine()
+    weak.add_finding("high", "tool_layer", "X", "weak")
+    assert weak.current_score() < strong.current_score()
+
+
+def test_confidence_still_monotonic():
+    engine = RiskScoreEngine()
+    for severity, category, rule_id, confidence in [
+        ("critical", "infrastructure", "A", "strong"),
+        ("low", "memory_state", "B", "weak"),
+        ("low", "memory_state", "C", "weak"),
+        ("high", "tool_layer", "D", "weak"),
+    ]:
+        _, delta = engine.add_finding(severity, category, rule_id, confidence)
+        assert delta >= 0
+
+
+def test_compute_from_findings_accepts_3_or_4_tuples():
+    findings = [
+        ("high", "tool_layer", "A"),
+        ("high", "tool_layer", "B", "weak"),
+    ]
+    score = RiskScoreEngine.compute_from_findings(findings)
+
+    engine = RiskScoreEngine()
+    engine.add_finding("high", "tool_layer", "A")
+    engine.add_finding("high", "tool_layer", "B", "weak")
+    assert score == engine.current_score()

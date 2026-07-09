@@ -87,6 +87,7 @@ class ScenarioRunner:
                             category=det.category,
                             title=det.title,
                             cwe=list(det.cwe),
+                            confidence=det.confidence,
                             evidence={
                                 "scenario": spec.slug,
                                 "match_count": len(matched),
