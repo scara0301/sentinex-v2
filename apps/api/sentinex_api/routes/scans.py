@@ -16,6 +16,7 @@ from sentinex_core.db.repos import (
     EventRepo,
     FindingRepo,
     RemediationRepo,
+    ScenarioRepo,
 )
 from sentinex_core.events.schema import BreakpointPayload, EventEnvelope
 from ..deps import get_db, get_authorized_workspace
@@ -42,6 +43,24 @@ async def start_scan(
     agent = await agent_repo.get_by_id(body.agent_id)
     if not agent or agent.workspace_id != workspace_id:
         raise HTTPException(404, "Agent not found")
+
+    # Every requested scenario must exist and be visible to this workspace.
+    # Without this a caller could name another tenant's private scenario
+    # UUIDs (the worker loads them by id with no ownership filter), and a
+    # mistyped id would silently produce a scan that runs nothing.
+    if body.scenario_ids:
+        scenario_repo = ScenarioRepo(db)
+        found = await scenario_repo.get_by_ids(list(body.scenario_ids))
+        visible = {
+            sc.id
+            for sc in found
+            if sc.builtin or sc.workspace_id == workspace_id
+        }
+        missing = [str(sid) for sid in body.scenario_ids if sid not in visible]
+        if missing:
+            raise HTTPException(
+                404, f"Unknown or inaccessible scenario(s): {', '.join(missing)}"
+            )
 
     scan_repo = ScanRepo(db)
     scan = await scan_repo.create(
@@ -231,6 +250,8 @@ async def review_finding(
     await db.commit()
 
     finding = await finding_repo.get_by_id(finding_id)
+    if finding is None:  # deleted between the update and the re-read
+        raise HTTPException(404, "Finding not found for this scan")
     return {
         "id": finding.id,
         "status": finding.status,

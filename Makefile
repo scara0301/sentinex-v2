@@ -9,7 +9,10 @@ build-scan-images:
 	docker build -t sentinex/mocks:latest apps/mocks
 	docker build -f packages/sandbox-image/Dockerfile.mockdb -t sentinex/mock-db:latest packages/sandbox-image
 
-dev-up: build-scan-images
+# A scan needs BOTH the per-scan service images and a sandbox image for the
+# agent itself; without the latter the very first scan fails with
+# ImageNotFound, so dev-up and prod-up depend on both.
+dev-up: build-scan-images build-sandbox
 	mkdir -p .data/uploads
 	docker compose -f infra/docker-compose.dev.yml up -d --build
 
@@ -21,7 +24,7 @@ dev-logs:
 
 # --- production (see DEPLOY.md) --------------------------------------------
 
-prod-up: build-scan-images
+prod-up: build-scan-images build-sandbox
 	docker compose --env-file .env -f infra/docker-compose.prod.yml up -d --build
 
 prod-down:

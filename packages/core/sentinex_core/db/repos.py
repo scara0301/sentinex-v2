@@ -1,8 +1,9 @@
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence, cast
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -160,20 +161,35 @@ class ScanRepo:
         )
         return result.scalars().all()
 
-    async def fail_stale(self, active_statuses: tuple[str, ...]) -> int:
-        """Mark scans stuck in a mid-flight status as FAILED.
+    async def claim(self, scan_id: uuid.UUID, worker_id: str) -> None:
+        """Record which worker process owns this scan while it runs."""
+        await self._session.execute(
+            update(Scan).where(Scan.id == scan_id).values(worker_id=worker_id)
+        )
 
-        Called at worker startup: any scan in an actively-running status has
-        no live orchestrator (the worker that owned it died), so it would
-        otherwise appear to run forever. Returns the number of scans updated.
+    async def fail_stale(
+        self, active_statuses: tuple[str, ...], worker_id: str
+    ) -> int:
+        """Mark this worker's abandoned mid-flight scans as FAILED.
+
+        Called at worker startup: a scan still in an actively-running status
+        and stamped with *this* worker's id has no live orchestrator (the
+        process that owned it died), so it would otherwise appear to run
+        forever. Scans owned by other workers are left alone — they may still
+        be running. Returns the number of scans updated.
         """
         now = datetime.now(timezone.utc)
         result = await self._session.execute(
             update(Scan)
-            .where(Scan.status.in_(active_statuses))
+            .where(
+                Scan.status.in_(active_statuses),
+                Scan.worker_id == worker_id,
+            )
             .values(status="FAILED", finished_at=now)
         )
-        return int(result.rowcount or 0)
+        # UPDATE returns CursorResult, whose rowcount the base Result type
+        # does not declare.
+        return int(cast("CursorResult[Any]", result).rowcount or 0)
 
 
 class EventRepo:

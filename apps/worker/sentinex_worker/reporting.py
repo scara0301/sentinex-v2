@@ -77,7 +77,7 @@ async def generate_report(scan_id: str) -> Path:
         )
 
     severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    finding_rows.sort(key=lambda r: severity_order.get(r["severity"], 9))
+    finding_rows.sort(key=lambda r: severity_order.get(str(r["severity"]), 9))
 
     score = float(scan.risk_score) if scan.risk_score is not None else None
     grade = grade_for_score(score)

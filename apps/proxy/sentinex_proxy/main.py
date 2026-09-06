@@ -26,7 +26,11 @@ from sentinex_core.events.schema import (
 from sentinex_core.findings import honeypots
 from sentinex_proxy.chain_tracker import ChainTracker
 from sentinex_proxy.injection import InjectionEngine
-from sentinex_proxy.interceptors.http import classify_request, classify_response
+from sentinex_proxy.interceptors.http import (
+    classify_connect_attempt,
+    classify_request,
+    classify_response,
+)
 from sentinex_proxy.settings import proxy_settings
 
 log = structlog.get_logger()
@@ -42,6 +46,10 @@ class SentinexAddon:
         self.chain_tracker.seed_sensitive(honeypots.ALL)
         self.injector = InjectionEngine()
         self._pending: dict[str, tuple[float, EventEnvelope]] = {}
+        # Requests that never receive a response (timeouts, resets, a killed
+        # agent) would otherwise pin their envelope in memory for the life of
+        # the scan. Entries older than this are dropped opportunistically.
+        self._pending_ttl_seconds = 300.0
         # Breakpoint state (Sprint 5): while paused, tool responses are
         # intercepted (held) and released by resume/step control messages.
         self.paused = False
@@ -71,9 +79,10 @@ class SentinexAddon:
             self._control_task.cancel()
 
     async def request(self, flow: http.HTTPFlow) -> None:
+        # Every outbound request is recorded, including calls to hosts we
+        # don't recognize — the exfiltration scenarios match on the attacker
+        # host, so dropping unknown destinations would make them undetectable.
         classification = classify_request(flow)
-        if not classification:
-            return  # pass through unrecognized traffic
 
         chain_id = str(uuid.uuid4())
         flow.metadata["chain_id"] = chain_id
@@ -100,7 +109,42 @@ class SentinexAddon:
             ),
         )
         self._pending[chain_id] = (time.monotonic(), event)
+        self._expire_pending()
         await self._publish(event)
+
+    async def http_connect_error(self, flow: http.HTTPFlow) -> None:
+        """Record HTTPS CONNECT attempts that failed before the request hook.
+
+        This is the only signal that an agent tried to reach an unreachable
+        host — which, inside the sandbox, is exactly what a planted attacker
+        host is. The scenario detections key on the host, so recording the
+        attempt is what makes exfiltration observable at all.
+        """
+        try:
+            error = str(getattr(flow, "error", "") or "")
+            classification = classify_connect_attempt(flow, error)
+            event = EventEnvelope(
+                scan_id=self._scan_uuid(),
+                seq=await self._next_seq(),
+                ts=datetime.now(timezone.utc),
+                type="tool_call",
+                payload=ToolCallPayload(
+                    agent_id="unknown",
+                    tool=classification["tool"],
+                    args=classification["args"],
+                    transport="http",
+                    chain_id=str(uuid.uuid4()),
+                    host=classification["host"],
+                ),
+            )
+            log.info(
+                "Recorded failed CONNECT",
+                host=classification["host"],
+                error=error,
+            )
+            await self._publish(event)
+        except Exception as exc:
+            log.warning("Failed to record CONNECT error", error=str(exc))
 
     async def response(self, flow: http.HTTPFlow) -> None:
         chain_id = flow.metadata.get("chain_id")
@@ -140,6 +184,17 @@ class SentinexAddon:
             flow.intercept()
             self._intercepted.append(flow)
             log.info("Flow intercepted at breakpoint", tool=flow.metadata.get("tool"))
+
+    def _expire_pending(self) -> None:
+        """Drop pending request envelopes whose response never arrived."""
+        if len(self._pending) < 256:
+            return
+        cutoff = time.monotonic() - self._pending_ttl_seconds
+        stale = [cid for cid, (ts, _) in self._pending.items() if ts < cutoff]
+        for cid in stale:
+            self._pending.pop(cid, None)
+        if stale:
+            log.debug("Expired pending tool calls", count=len(stale))
 
     async def _ensure_rules_loaded(self) -> None:
         if self.injector.loaded or self.redis is None:

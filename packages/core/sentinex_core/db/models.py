@@ -129,6 +129,10 @@ class Scan(Base):
         UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Identity of the worker process that owns this scan while it is running.
+    # Startup reaping and stale-scan failure filter on it so one worker can
+    # never fail or tear down a scan belonging to a peer.
+    worker_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     scenario_ids: Mapped[Optional[List[uuid.UUID]]] = mapped_column(
         ARRAY(UUID(as_uuid=True)), nullable=True
     )
@@ -252,6 +256,7 @@ class Badge(Base):
 
 Index("ix_agents_workspace", Agent.workspace_id)
 Index("ix_scans_workspace_created", Scan.workspace_id, Scan.created_at)
+Index("ix_scans_worker_status", Scan.worker_id, Scan.status)
 Index("ix_events_scan_ts", Event.scan_id, Event.ts)
 Index("ix_findings_scan_severity", Finding.scan_id, Finding.severity)
 Index("ix_findings_scan_status_severity", Finding.scan_id, Finding.status, Finding.severity)

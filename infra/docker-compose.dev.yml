@@ -44,6 +44,10 @@ services:
       UPLOAD_DIR: /data/uploads
       REPORT_DIR: /data/reports
       DEBUG: "true"
+      # Badges are signed with this. Overridable from the environment so a
+      # dev stack does not silently fall back to the "change-me" default
+      # baked into Settings; production sets it from .env (see prod compose).
+      SECRET_KEY: ${SECRET_KEY:-sentinex-dev-only-not-for-production}
     depends_on:
       postgres:
         condition: service_healthy

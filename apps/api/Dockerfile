@@ -11,7 +11,13 @@ RUN pip install --no-cache-dir uv==0.8.17
 COPY packages/core packages/core
 COPY apps/api apps/api
 # Editable installs so dev compose can bind-mount source for hot reload.
-RUN uv pip install --system --no-cache -e ./packages/core -e ./apps/api
+# --no-sources: each app's pyproject declares
+# `sentinex-core = { workspace = true }`, but the build context here holds only
+# this app plus packages/core — the root pyproject that defines the uv
+# workspace is absent, so uv fails with "references a workspace ... but is not
+# a workspace member". Ignoring tool.uv.sources resolves sentinex-core from the
+# editable path installed in the same command instead.
+RUN uv pip install --system --no-cache --no-sources -e ./packages/core -e ./apps/api
 
 # Upload/report storage roots (overridable via UPLOAD_DIR / REPORT_DIR).
 RUN mkdir -p /data/uploads /data/reports

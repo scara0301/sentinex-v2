@@ -10,14 +10,23 @@ RUN pip install --no-cache-dir uv==0.8.17
 
 COPY packages/core packages/core
 COPY apps/proxy apps/proxy
-RUN uv pip install --system --no-cache -e ./packages/core -e ./apps/proxy
+# --no-sources: each app's pyproject declares
+# `sentinex-core = { workspace = true }`, but the build context here holds only
+# this app plus packages/core — the root pyproject that defines the uv
+# workspace is absent, so uv fails with "references a workspace ... but is not
+# a workspace member". Ignoring tool.uv.sources resolves sentinex-core from the
+# editable path installed in the same command instead.
+RUN uv pip install --system --no-cache --no-sources -e ./packages/core -e ./apps/proxy
 
 # mitmproxy writes its CA bundle to confdir; pin it to a deterministic path
 # the orchestrator reads from to plant the CA in agent sandboxes.
-RUN useradd --create-home --uid 1000 proxy
-USER proxy
+# NOT "proxy": Debian's base image already ships a system account with that
+# name, so `useradd proxy` exits 9 ("user already exists") and the image fails
+# to build.
+RUN useradd --create-home --uid 1000 sentinex
+USER sentinex
 
-ENV MITMPROXY_CONFDIR=/home/proxy/.mitmproxy
+ENV MITMPROXY_CONFDIR=/home/sentinex/.mitmproxy
 
 EXPOSE 8080
 # gen_ca pre-generates the CA store with a generic CN before mitmdump starts

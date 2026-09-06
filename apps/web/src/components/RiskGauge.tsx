@@ -32,8 +32,11 @@ export default function RiskGauge({
   drivers = [],
   findingCount = 0,
 }: RiskGaugeProps) {
+  // `progress` runs 0 -> 1 for each score change and drives both the counter
+  // and the pulse. Deriving the pulse from it removes a second state whose
+  // setter fired synchronously inside the effect, which cascades renders.
+  const [progress, setProgress] = useState(1);
   const [displayScore, setDisplayScore] = useState(0);
-  const [isPulsing, setIsPulsing] = useState(false);
   const prevScoreRef = useRef(0);
 
   useEffect(() => {
@@ -45,10 +48,11 @@ export default function RiskGauge({
 
     const animate = (now: number) => {
       const elapsed = now - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      const eased = 1 - Math.pow(1 - progress, 3);
+      const p = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - p, 3);
       setDisplayScore(start + (end - start) * eased);
-      if (progress < 1) {
+      setProgress(p);
+      if (p < 1) {
         rafId = requestAnimationFrame(animate);
       }
     };
@@ -56,16 +60,10 @@ export default function RiskGauge({
     rafId = requestAnimationFrame(animate);
     prevScoreRef.current = end;
 
-    if (delta !== 0) {
-      setIsPulsing(true);
-      const t = setTimeout(() => setIsPulsing(false), 600);
-      return () => {
-        cancelAnimationFrame(rafId);
-        clearTimeout(t);
-      };
-    }
     return () => cancelAnimationFrame(rafId);
   }, [score, delta]);
+
+  const isPulsing = delta !== 0 && progress < 1;
 
   const radius = 80;
   const stroke = 10;

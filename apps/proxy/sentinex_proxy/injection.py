@@ -46,6 +46,9 @@ class InjectionEngine:
         self.loaded = True
         if not raw:
             return
+        if not isinstance(raw, (str, bytes, bytearray)):
+            log.warning("Unexpected injection rules type", type=type(raw).__name__)
+            return
         try:
             rules = json.loads(raw)
         except (TypeError, ValueError) as exc:

@@ -1,10 +1,11 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 import { useScanWS, type WSEvent } from "@/lib/ws";
+import { useApiKey } from "@/lib/session";
 import EventStream from "@/components/EventStream";
 import RiskGauge from "@/components/RiskGauge";
 import ScanStatusBadge from "@/components/ScanStatusBadge";
@@ -20,7 +21,6 @@ interface FindingEntry {
   title: string;
 }
 
-const STORAGE_KEY = "sentinex_api_key";
 
 function ScanLiveView() {
   const params = useParams();
@@ -34,20 +34,10 @@ function ScanLiveView() {
   const [riskDelta, setRiskDelta] = useState(0);
   const [riskDrivers, setRiskDrivers] = useState<string[]>([]);
   const [findings, setFindings] = useState<FindingEntry[]>([]);
-  const [apiKey, setApiKey] = useState<string>("");
 
-  // Resolve the API key (client-only): build-time env, persisted value, or a
-  // ?api_key= deep link (which we then persist for reconnects).
-  useEffect(() => {
-    const fromQuery = searchParams.get("api_key");
-    if (fromQuery) {
-      window.localStorage.setItem(STORAGE_KEY, fromQuery);
-      setApiKey(fromQuery);
-      return;
-    }
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    setApiKey(stored || process.env.NEXT_PUBLIC_SENTINEX_API_KEY || "");
-  }, [searchParams]);
+  // Deep link, then localStorage, then the build-time default — same
+  // resolution as the dashboard home page.
+  const apiKey = useApiKey(searchParams.get("api_key"));
 
   const handleEvent = useCallback((event: WSEvent) => {
     setEvents((prev) => [...prev, event]);

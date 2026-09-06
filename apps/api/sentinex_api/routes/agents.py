@@ -1,7 +1,8 @@
+import re
 import shutil
 import subprocess
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 import aiofiles
@@ -16,10 +17,40 @@ router = APIRouter()
 
 ALLOWED_EXTENSIONS = {".zip", ".tar", ".tar.gz", ".tgz", ".py"}
 
+# Agent names become a directory component under the upload root, so they are
+# restricted to characters that cannot traverse or escape it.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
 
 def _allowed_upload(filename: str) -> bool:
     name = filename.lower()
     return any(name.endswith(ext) for ext in ALLOWED_EXTENSIONS)
+
+
+def _validate_agent_name(name: str) -> str:
+    """Reject agent names that could escape the upload directory.
+
+    ``name`` is an unvalidated multipart field that is used as a path
+    component; a value like ``../../etc`` would otherwise write outside
+    ``settings.upload_dir``.
+    """
+    if not _SAFE_NAME_RE.match(name):
+        raise HTTPException(
+            400,
+            "Invalid agent name: use 1-128 characters from [A-Za-z0-9._-], "
+            "starting with a letter or digit.",
+        )
+    return name
+
+
+def _safe_upload_filename(filename: Optional[str]) -> str:
+    """Reduce a client-supplied filename to a single safe path component."""
+    # Strip any directory portion the client sent (POSIX or Windows style),
+    # then reject the results that are still not a usable file name.
+    base = PurePosixPath((filename or "").replace("\\", "/")).name
+    if not base or base in (".", "..") or not _SAFE_NAME_RE.match(base):
+        return "bundle"
+    return base
 
 
 async def _save_upload(file: UploadFile, dest_path: Path) -> None:
@@ -60,10 +91,10 @@ def _extract_bundle(archive_path: Path, extract_dir: Path) -> None:
                     f"Archive uncompressed size {total_size} bytes exceeds 500 MB limit"
                 )
             # Path-traversal guard
-            for member in zf.infolist():
-                dest = (target / member.filename).resolve()
+            for zip_member in zf.infolist():
+                dest = (target / zip_member.filename).resolve()
                 if not str(dest).startswith(str(target) + os.sep) and str(dest) != str(target):
-                    raise ValueError(f"Unsafe path in archive: {member.filename}")
+                    raise ValueError(f"Unsafe path in archive: {zip_member.filename}")
             zf.extractall(target)
 
     elif any(name.endswith(ext) for ext in (".tar.gz", ".tgz", ".tar")):
@@ -76,12 +107,14 @@ def _extract_bundle(archive_path: Path, extract_dir: Path) -> None:
                     f"Archive uncompressed size {total_size} bytes exceeds 500 MB limit"
                 )
             # Path-traversal + symlink guard
-            for member in members:
-                if member.issym() or member.islnk():
-                    raise ValueError(f"Symbolic/hard links not allowed in archive: {member.name}")
-                dest = (target / member.name).resolve()
+            for tar_member in members:
+                if tar_member.issym() or tar_member.islnk():
+                    raise ValueError(
+                        f"Symbolic/hard links not allowed in archive: {tar_member.name}"
+                    )
+                dest = (target / tar_member.name).resolve()
                 if not str(dest).startswith(str(target) + os.sep) and str(dest) != str(target):
-                    raise ValueError(f"Unsafe path in archive: {member.name}")
+                    raise ValueError(f"Unsafe path in archive: {tar_member.name}")
             tf.extractall(target)
     # .py files are left as-is — no extraction needed
 
@@ -130,10 +163,16 @@ async def upload_agent(
             f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
         )
 
-    bundle_root = Path(settings.upload_dir) / str(workspace_id) / name
+    name = _validate_agent_name(name)
+    upload_root = Path(settings.upload_dir).resolve()
+    bundle_root = (upload_root / str(workspace_id) / name).resolve()
+    # Defence in depth: even with both components validated, confirm the
+    # resolved destination is still inside the upload root before writing.
+    if not bundle_root.is_relative_to(upload_root):
+        raise HTTPException(400, "Invalid agent name")
     bundle_root.mkdir(parents=True, exist_ok=True)
 
-    archive_path = bundle_root / (file.filename or "bundle")
+    archive_path = bundle_root / _safe_upload_filename(file.filename)
     await _save_upload(file, archive_path)
 
     extract_dir = bundle_root / "src"
@@ -205,8 +244,7 @@ async def list_agents(
     db: AsyncSession = Depends(get_db),
     workspace=Depends(get_authorized_workspace),
 ):
-    if workspace.id != workspace_id:
-        raise HTTPException(404, "Workspace not found")
+    # get_authorized_workspace already proved the key owns workspace_id.
     repo = AgentRepo(db)
     agents = await repo.list_by_workspace(workspace_id)
     return [
@@ -227,8 +265,6 @@ async def get_agent(
     db: AsyncSession = Depends(get_db),
     workspace=Depends(get_authorized_workspace),
 ):
-    if workspace.id != workspace_id:
-        raise HTTPException(404, "Workspace not found")
     repo = AgentRepo(db)
     agent = await repo.get_by_id(agent_id)
     if not agent or agent.workspace_id != workspace_id:

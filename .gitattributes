@@ -1,0 +1,25 @@
+# Default: let git normalize text files in the repository to LF.
+* text=auto
+
+# Files consumed by Linux containers MUST keep LF in the working tree.
+# On a Windows checkout core.autocrlf=true would otherwise write CRLF, and
+# `docker build` copies the working-tree file straight into the image — a
+# shell script whose shebang ends in \r fails to exec with
+# "no such file or directory".
+*.sh            text eol=lf
+*.bash          text eol=lf
+entrypoint.sh   text eol=lf
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.sql           text eol=lf
+*.j2            text eol=lf
+Makefile        text eol=lf
+Caddyfile       text eol=lf
+
+# Binary — never touch.
+*.png binary
+*.jpg binary
+*.ico binary
+*.svg text eol=lf

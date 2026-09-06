@@ -12,6 +12,7 @@ import hashlib
 import hmac
 from datetime import datetime
 from typing import Optional
+from xml.sax.saxutils import escape, quoteattr
 
 # (max_score, grade) — evaluated in order. None scores render as "?".
 _GRADE_BANDS: list[tuple[float, str]] = [
@@ -53,13 +54,21 @@ def render_badge_svg(
     value = grade if score is None else f"{grade} ({score:.0f})"
     color = _GRADE_COLORS.get(grade, _GRADE_COLORS["?"])
 
+    # Width is computed from the raw text; only the rendered text is escaped,
+    # so entity expansion cannot distort the layout. The badge endpoint is
+    # unauthenticated and this helper is public, so nothing reaches the markup
+    # unescaped even though every current caller passes a fixed string.
+    label_text = escape(label)
+    value_text = escape(value)
+    aria_label = quoteattr(f"{label}: {value}")
+
     char_w = 6.5
     pad = 10
     label_w = int(len(label) * char_w + pad * 2)
     value_w = int(len(value) * char_w + pad * 2)
     total_w = label_w + value_w
 
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="20" role="img" aria-label="{label}: {value}">
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="20" role="img" aria-label={aria_label}>
   <linearGradient id="s" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
     <stop offset="1" stop-opacity=".1"/>
@@ -71,8 +80,8 @@ def render_badge_svg(
     <rect width="{total_w}" height="20" fill="url(#s)"/>
   </g>
   <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
-    <text x="{label_w / 2}" y="14">{label}</text>
-    <text x="{label_w + value_w / 2}" y="14" font-weight="bold">{value}</text>
+    <text x="{label_w / 2}" y="14">{label_text}</text>
+    <text x="{label_w + value_w / 2}" y="14" font-weight="bold">{value_text}</text>
   </g>
 </svg>
 """

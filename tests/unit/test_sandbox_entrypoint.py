@@ -21,9 +21,41 @@ ENTRYPOINT = (
     / "entrypoint.sh"
 )
 
+BASH = shutil.which("bash")
+
+
+def _bash_works() -> bool:
+    """A resolvable bash is not necessarily a working one.
+
+    On Windows the `bash` found on PATH is often the WSL stub, which fails
+    with an RPC error when no distribution is installed. Probe it so a broken
+    interpreter is reported as a skip rather than as an entrypoint failure.
+    """
+    if BASH is None:
+        return False
+    try:
+        probe = subprocess.run(
+            [BASH, "-c", "echo ok"], capture_output=True, text=True, timeout=30
+        )
+    except Exception:
+        return False
+    return probe.returncode == 0 and probe.stdout.strip() == "ok"
+
+
 pytestmark = pytest.mark.skipif(
-    shutil.which("bash") is None, reason="bash not available"
+    not _bash_works(), reason="a working bash is not available"
 )
+
+
+def test_entrypoint_has_unix_line_endings():
+    """The image runs this on Linux; a CR in the shebang breaks exec.
+
+    A Windows checkout with core.autocrlf=true writes CRLF into the working
+    tree, and `docker build` copies the working-tree file verbatim — the
+    container then fails to start with "no such file or directory" because
+    the interpreter path literally ends in a carriage return.
+    """
+    assert b"\r\n" not in ENTRYPOINT.read_bytes()
 
 
 def _run(work: Path, env_extra: dict | None = None):
@@ -32,17 +64,25 @@ def _run(work: Path, env_extra: dict | None = None):
     bindir.mkdir(exist_ok=True)
     shim = bindir / "python"
     # Stub python: print the script path it was asked to run, then exit 0.
-    shim.write_text('#!/bin/bash\necho "RAN:$1"\n')
+    # newline="\n" so the shim keeps a LF shebang on Windows too.
+    shim.write_text('#!/bin/bash\necho "RAN:$1"\n', newline="\n")
     shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
 
-    # The script hardcodes /work paths; rewrite to the temp work dir.
-    script = ENTRYPOINT.read_text().replace("/work", str(work))
+    # The script hardcodes /work paths; rewrite to the temp work dir. POSIX
+    # separators throughout, because str(Path) on Windows embeds backslashes
+    # that bash would read as escapes.
+    script = ENTRYPOINT.read_text().replace("/work", work.as_posix())
 
-    env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+    # Inherit the real environment and prepend the shim dir using the
+    # platform's separator. Replacing the environment outright — or joining
+    # with ":" on Windows — leaves bash with an unusable PATH, which silently
+    # resolves a different interpreter.
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([bindir.as_posix(), env.get("PATH", "")])
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        ["bash", "-c", script],
+        [BASH, "-c", script],
         capture_output=True,
         text=True,
         env=env,

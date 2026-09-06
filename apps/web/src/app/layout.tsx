@@ -48,7 +48,13 @@ export default function RootLayout({
           </Link>
           <div className="navbar-links">
             <Link href="/">Dashboard</Link>
-            <Link href="/docs">Docs</Link>
+            <a
+              href="https://github.com/sentinex/sentinex"
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              Docs
+            </a>
           </div>
         </nav>
         {children}

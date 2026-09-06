@@ -9,7 +9,7 @@ import docker.models.containers
 import docker.models.networks
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional, cast
 
 from sentinex_core.db.base import get_session
 from sentinex_core.db.models import Event as EventModel
@@ -41,6 +41,11 @@ from .settings import worker_settings
 
 log = structlog.get_logger()
 
+# Mirror the Literal unions on the event payload models; DB rows carry these
+# as plain strings, so writes into payloads are cast at the call site.
+Severity = Literal["critical", "high", "medium", "low", "info"]
+Confidence = Literal["strong", "weak"]
+
 SCAN_STATES = [
     "PENDING",
     "PROVISIONING",
@@ -71,9 +76,17 @@ class ScanOrchestrator:
     mid-provision.
     """
 
-    def __init__(self, docker_client: docker.DockerClient, redis_client):
+    def __init__(
+        self,
+        docker_client: docker.DockerClient,
+        redis_client,
+        worker_id: str = "unknown",
+    ):
         self.docker = docker_client
         self.redis = redis_client
+        # Stamped onto every container/network and onto the scan row, so
+        # startup reaping only ever touches sandboxes this worker owns.
+        self.worker_id = worker_id
         # Ordered list of containers created during this scan; reversed on teardown
         # so the agent is stopped before its dependencies.
         self._containers: list[docker.models.containers.Container] = []
@@ -82,6 +95,8 @@ class ScanOrchestrator:
         # and persisted to the events table at DRAINING.
         self._collected: list[dict[str, Any]] = []
         self._collector_task: Optional[asyncio.Task] = None
+        # Set once the collector's Redis subscription is confirmed live.
+        self._subscribed: Optional[asyncio.Event] = None
         # Path to the extracted proxy CA cert (cleaned up on teardown).
         self._ca_cert_path: Optional[Path] = None
 
@@ -111,6 +126,10 @@ class ScanOrchestrator:
                 return
 
         try:
+            async with get_session() as db:
+                await ScanRepo(db).claim(scan_uuid, self.worker_id)
+                await db.commit()
+
             runner = ScenarioRunner(await self._load_scenario_specs(scan))
             bound_log.info("Scenarios loaded", count=len(runner.specs))
 
@@ -125,14 +144,20 @@ class ScanOrchestrator:
             await self._transition(scan_uuid, "PROVISIONING")
             # Injection rules must be in Redis before the proxy boots.
             await self._push_injection_rules(scan_uuid, runner)
+            # Subscribe *before* provisioning: the proxy starts publishing the
+            # moment its container is up, and Redis pub/sub keeps no backlog,
+            # so a collector started afterwards silently loses those events.
+            await self._start_event_collector(scan_uuid)
             network, proxy_container, mock_containers = await self._provision(scan_uuid, agent)
-            self._start_event_collector(scan_uuid)
 
             await self._transition(scan_uuid, "SEEDING")
             await self._seed_mock_db(scan_uuid, mock_containers.get("mock-db"))
 
             await self._transition(scan_uuid, "RUNNING")
             ca_cert_path = await self._extract_proxy_ca(scan_uuid, proxy_container)
+            # The CA is written before mitmdump binds its port, so wait for the
+            # listener itself before letting the agent make its first call.
+            await self._wait_for_proxy_ready(scan_uuid, proxy_container)
             agent_container = await self._launch_agent(
                 scan_uuid, agent, network, proxy_container, ca_cert_path
             )
@@ -170,6 +195,13 @@ class ScanOrchestrator:
         finally:
             await self._teardown(scan_uuid)
 
+    def _labels(self, scan_id: uuid.UUID, role: str) -> dict[str, str]:
+        return {
+            "sentinex.scan_id": str(scan_id),
+            "sentinex.worker_id": self.worker_id,
+            "sentinex.role": role,
+        }
+
     # ------------------------------------------------------------------
     # Docker provisioning
     # ------------------------------------------------------------------
@@ -189,11 +221,15 @@ class ScanOrchestrator:
         must pass through the proxy container.
         """
         network_name = f"sx-{scan_id}"
-        network = self.docker.networks.create(
+        # The Docker SDK is synchronous; every call here is offloaded so a
+        # provisioning scan cannot block the event loop shared by the other
+        # concurrent jobs, their event collectors, and the report renders.
+        network = await asyncio.to_thread(
+            self.docker.networks.create,
             network_name,
             driver="bridge",
             internal=True,  # NO host egress; agent must route through proxy
-            labels={"sentinex.scan_id": str(scan_id)},
+            labels=self._labels(scan_id, "network"),
         )
         self._network = network
         log.info("Created sandbox network", network=network_name, scan_id=str(scan_id))
@@ -204,7 +240,7 @@ class ScanOrchestrator:
         # when the image hasn't been built.
         mock_db_image = worker_settings.mock_db_image
         try:
-            self.docker.images.get(mock_db_image)
+            await asyncio.to_thread(self.docker.images.get, mock_db_image)
         except docker.errors.ImageNotFound:
             log.warning(
                 "Seeded mock-db image not found; using unseeded postgres",
@@ -212,7 +248,8 @@ class ScanOrchestrator:
                 scan_id=str(scan_id),
             )
             mock_db_image = "postgres:16-alpine"
-        mock_db = self.docker.containers.run(
+        mock_db = await asyncio.to_thread(
+            self.docker.containers.run,
             mock_db_image,
             detach=True,
             network=network_name,
@@ -222,10 +259,7 @@ class ScanOrchestrator:
                 "POSTGRES_USER": "mockuser",
                 "POSTGRES_PASSWORD": "mockpass",
             },
-            labels={
-                "sentinex.scan_id": str(scan_id),
-                "sentinex.role": "mock-db",
-            },
+            labels=self._labels(scan_id, "mock-db"),
             mem_limit=worker_settings.sandbox_mem_limit,
         )
         self._containers.append(mock_db)
@@ -233,16 +267,14 @@ class ScanOrchestrator:
         # ---- mock providers --------------------------------------------
         mocks: dict[str, docker.models.containers.Container] = {"mock-db": mock_db}
         for provider in ("stripe", "slack"):
-            mock = self.docker.containers.run(
+            mock = await asyncio.to_thread(
+                self.docker.containers.run,
                 "sentinex/mocks:latest",
                 detach=True,
                 network=network_name,
                 name=f"sx-{scan_id}-mock-{provider}",
                 environment={"MOCK_PROVIDER": provider},
-                labels={
-                    "sentinex.scan_id": str(scan_id),
-                    "sentinex.role": f"mock-{provider}",
-                },
+                labels=self._labels(scan_id, f"mock-{provider}"),
             )
             self._containers.append(mock)
             mocks[f"mock-{provider}"] = mock
@@ -256,7 +288,8 @@ class ScanOrchestrator:
         # ---- mitmproxy -----------------------------------------------
         # The proxy intercepts all agent traffic, records events, and
         # streams them to Redis for the API to fan out over WebSockets.
-        proxy = self.docker.containers.run(
+        proxy = await asyncio.to_thread(
+            self.docker.containers.run,
             "sentinex/proxy:latest",
             detach=True,
             network=network_name,
@@ -266,10 +299,7 @@ class ScanOrchestrator:
                 "REDIS_URL": worker_settings.redis_url,
                 "MOCK_HOST_MAP": json.dumps(mock_host_map),
             },
-            labels={
-                "sentinex.scan_id": str(scan_id),
-                "sentinex.role": "proxy",
-            },
+            labels=self._labels(scan_id, "proxy"),
         )
         self._containers.append(proxy)
 
@@ -278,10 +308,11 @@ class ScanOrchestrator:
         # the sandbox.
         if worker_settings.proxy_egress_network:
             try:
-                egress = self.docker.networks.get(
-                    worker_settings.proxy_egress_network
+                egress = await asyncio.to_thread(
+                    self.docker.networks.get,
+                    worker_settings.proxy_egress_network,
                 )
-                egress.connect(proxy)
+                await asyncio.to_thread(egress.connect, proxy)
             except docker.errors.NotFound:
                 log.warning(
                     "Proxy egress network not found; events will not reach Redis",
@@ -323,7 +354,15 @@ class ScanOrchestrator:
             try:
                 res = await asyncio.to_thread(
                     proxy_container.exec_run,
-                    "cat /home/proxy/.mitmproxy/mitmproxy-ca-cert.pem",
+                    # Resolve through the image's own MITMPROXY_CONFDIR so
+                    # this keeps working if the proxy image's user or home
+                    # directory changes.
+                    [
+                        "sh",
+                        "-c",
+                        'cat "${MITMPROXY_CONFDIR:-/home/sentinex/.mitmproxy}"'
+                        "/mitmproxy-ca-cert.pem",
+                    ],
                     demux=False,
                 )
                 if res.exit_code == 0 and res.output and b"BEGIN CERTIFICATE" in res.output:
@@ -347,6 +386,57 @@ class ScanOrchestrator:
         cert_path.write_bytes(ca_pem)
         self._ca_cert_path = cert_path
         return str(cert_path)
+
+    async def _wait_for_proxy_ready(
+        self,
+        scan_id: uuid.UUID,
+        proxy_container: docker.models.containers.Container,
+        attempts: int = 60,
+    ) -> bool:
+        """Block until mitmdump is actually accepting connections.
+
+        The CA file is written by ``gen_ca`` *before* mitmdump starts, so the
+        successful CA read in ``_extract_proxy_ca`` is not a readiness signal —
+        the listener comes up roughly a second later. Launching the agent in
+        that window means its very first tool call hits a closed port, the
+        agent errors out, and the scan completes with zero recorded events and
+        a clean grade. A fast agent could therefore never be scanned.
+
+        Probes with a real TCP connect rather than a port-state check, so this
+        returns only once the proxy will genuinely serve a request.
+        """
+        probe = (
+            "import socket,sys;"
+            "s=socket.create_connection(('127.0.0.1',%d),1);"
+            "s.close()" % worker_settings.proxy_port
+        )
+        for attempt in range(attempts):
+            try:
+                res = await asyncio.to_thread(
+                    proxy_container.exec_run,
+                    ["python", "-c", probe],
+                    demux=False,
+                )
+                if res.exit_code == 0:
+                    log.info(
+                        "Proxy is accepting connections",
+                        attempt=attempt + 1,
+                        scan_id=str(scan_id),
+                    )
+                    return True
+            except Exception as exc:
+                log.debug(
+                    "Proxy readiness probe failed",
+                    error=str(exc),
+                    scan_id=str(scan_id),
+                )
+            await asyncio.sleep(0.5)
+
+        log.warning(
+            "Proxy never accepted connections; agent traffic will go unrecorded",
+            scan_id=str(scan_id),
+        )
+        return False
 
     async def _launch_agent(
         self,
@@ -381,7 +471,7 @@ class ScanOrchestrator:
 
         # Fall back to base image when a framework-specific variant hasn't been built yet.
         try:
-            self.docker.images.get(image)
+            await asyncio.to_thread(self.docker.images.get, image)
         except docker.errors.ImageNotFound:
             log.warning(
                 "Framework image not found, falling back to base",
@@ -390,6 +480,19 @@ class ScanOrchestrator:
                 scan_id=str(scan_id),
             )
             image = worker_settings.sandbox_image_base
+            try:
+                await asyncio.to_thread(self.docker.images.get, image)
+            except docker.errors.ImageNotFound as exc:
+                # Neither the framework image nor the base image exists.
+                # Fail with an actionable message instead of the SDK's bare
+                # ImageNotFound — this is what a fresh install hits when the
+                # sandbox images were never built.
+                raise RuntimeError(
+                    f"No sandbox image available: neither "
+                    f"sentinex/sandbox-{framework}:latest nor "
+                    f"{worker_settings.sandbox_image_base} is present. "
+                    f"Build them with `make build-sandbox`."
+                ) from exc
 
         proxy_addr = f"http://sx-{scan_id}-proxy:{worker_settings.proxy_port}"
 
@@ -420,7 +523,8 @@ class ScanOrchestrator:
             environment["CURL_CA_BUNDLE"] = ca_mount
             environment["NODE_EXTRA_CA_CERTS"] = ca_mount
 
-        container = self.docker.containers.run(
+        container = await asyncio.to_thread(
+            self.docker.containers.run,
             image,
             detach=True,
             network=network.name,
@@ -437,10 +541,7 @@ class ScanOrchestrator:
                 "/tmp": "size=256m",
                 "/work_rw": "size=512m",
             },
-            labels={
-                "sentinex.scan_id": str(scan_id),
-                "sentinex.role": "agent",
-            },
+            labels=self._labels(scan_id, "agent"),
         )
         log.info(
             "Agent container launched",
@@ -580,15 +681,26 @@ class ScanOrchestrator:
         )
         log.info("Injection rules staged", count=len(rules), scan_id=str(scan_id))
 
-    def _start_event_collector(self, scan_id: uuid.UUID) -> None:
+    async def _start_event_collector(self, scan_id: uuid.UUID) -> None:
+        """Start the pub/sub collector and wait until it is actually subscribed."""
         if self.redis is None:
             return
         self._collected = []
+        self._subscribed = asyncio.Event()
         self._collector_task = asyncio.create_task(self._collect_events(scan_id))
+        try:
+            await asyncio.wait_for(self._subscribed.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            log.warning(
+                "Event collector did not confirm subscription; "
+                "early proxy events may be lost",
+                scan_id=str(scan_id),
+            )
 
     async def _stop_event_collector(self) -> None:
         task = self._collector_task
         self._collector_task = None
+        self._subscribed = None
         if task is None:
             return
         task.cancel()
@@ -608,6 +720,8 @@ class ScanOrchestrator:
         channel = f"scan:{scan_id}:events"
         try:
             await pubsub.subscribe(channel)
+            if self._subscribed is not None:
+                self._subscribed.set()
             async for message in pubsub.listen():
                 if message.get("type") != "message":
                     continue
@@ -801,13 +915,16 @@ class ScanOrchestrator:
                     seq=finding_seq,
                     ts=finding_ts,
                     type="finding",
+                    # severity/confidence are plain strings on the DB row but
+                    # Literal-typed on the payload; they are written only from
+                    # DSL-validated values, so a cast is accurate here.
                     payload=FindingPayload(
                         finding_id=str(f.id),
                         category=f.category,
                         rule_id=f.rule_id,
-                        severity=f.severity,
+                        severity=cast(Severity, f.severity),
                         title=f.title,
-                        confidence=f.confidence,
+                        confidence=cast(Confidence, f.confidence),
                     ),
                 )
                 if self.redis is not None:
@@ -902,8 +1019,10 @@ class ScanOrchestrator:
             seq=seq,
             ts=ts,
             type="state",
+            # populate_by_name is enabled on StatePayload, so the field name
+            # works at runtime even though the schema declares alias "from".
             payload=StatePayload(
-                from_=old_state,
+                from_=old_state,  # type: ignore[call-arg]
                 to=new_state,
                 reason="orchestrator",
             ),
@@ -960,7 +1079,7 @@ class ScanOrchestrator:
         for container in reversed(self._containers):
             name = getattr(container, "name", "<unknown>")
             try:
-                container.remove(force=True)
+                await asyncio.to_thread(container.remove, force=True)
                 log.debug("Removed container", name=name, scan_id=str(scan_id))
             except docker.errors.NotFound:
                 # Already gone — that's fine.
@@ -975,7 +1094,7 @@ class ScanOrchestrator:
 
         if self._network is not None:
             try:
-                self._network.remove()
+                await asyncio.to_thread(self._network.remove)
                 log.debug(
                     "Removed sandbox network",
                     network=self._network.name,

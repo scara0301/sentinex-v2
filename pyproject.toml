@@ -16,3 +16,20 @@ dev-dependencies = [
   "mypy>=1.10",
   "ruff>=0.4",
 ]
+
+[tool.mypy]
+python_version = "3.12"
+# Third-party packages that ship no type information. Listing them here keeps
+# `make lint` meaningful: real type errors in our own code are not buried
+# under dozens of "library stubs not installed" notes.
+[[tool.mypy.overrides]]
+module = [
+  "docker.*",
+  "yaml",
+  "aiofiles",
+  "aiofiles.*",
+  "weasyprint",
+  "mitmproxy.*",
+  "arq.*",
+]
+ignore_missing_imports = true
